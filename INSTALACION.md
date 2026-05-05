@@ -1,0 +1,542 @@
+# Monitoreo CMF — Documentación Técnica de Instalación
+
+**Sistema:** Monitoreo CMF - Resoluciones de Autorización de Entidades  
+**Propósito:** Descarga diaria de resoluciones de la Comisión para el Mercado Financiero, clasificación automática por categoría, enriquecimiento con datos del registro oficial y generación de un panel de control HTML con información de nuevas entidades autorizadas.  
+**Audiencia:** Equipo de Tecnologías de la Información  
+**Última actualización:** Mayo 2026
+
+---
+
+## 1. Qué hace este sistema
+
+Cada día, el sistema ejecuta cinco pasos en secuencia:
+
+| Paso | Script | Qué hace | Tiempo aprox. |
+|------|--------|----------|---------------|
+| 1 | `scraper.py` | Descarga las resoluciones CMF de los últimos 90 días y extrae entidad y tipo de servicio | 15–30 seg |
+| 1.5 | `scraper.py` | Repara entidades que quedaron vacías en archivos históricos (idempotente, no re-procesa si ya está correcto) | < 5 seg |
+| 2 | `classifier.py` | Clasifica cada resolución por categoría | < 5 seg |
+| 3 | `enricher.py` | Consulta el registro CMF por cada entidad nueva: obtiene RUT, código de institución, domicilio, contacto, etc. | 3–8 min (*) |
+| 4 | `dashboard.py` | Genera `reports/dashboard.html` con panel de control interactivo | < 5 seg |
+
+(*) El enriquecimiento respeta pausas de 2 segundos entre solicitudes para no sobrecargar el servidor CMF. Solo procesa entidades nuevas (no re-procesa las ya registradas).
+
+**Salidas del sistema:**
+- `data/YYYY-MM-DD.json` — datos del día en formato JSON
+- `reports/dashboard.html` — panel de control autocontenido (no requiere servidor web para visualizarse)
+
+---
+
+## 2. Qué muestra el dashboard
+
+El archivo `reports/dashboard.html` es un panel de control interactivo con las siguientes secciones:
+
+### Tarjetas de resumen (parte superior)
+| Tarjeta | Descripción |
+|---------|-------------|
+| Resoluciones en los últimos 90 días (desde DD/MM/AAAA) | Total de resoluciones CMF emitidas en los 90 días anteriores a la fecha de generación |
+| Entidades autorizadas en los últimos 90 días (desde DD/MM/AAAA) | Total de resoluciones "AUTORIZA LA PRESTACIÓN" vigentes en los últimos 90 días |
+| Sin código de institución en los últimos 90 días (desde DD/MM/AAAA) | Entidades autorizadas en los últimos 90 días que aún no tienen código de institución CMF asignado |
+
+La fecha entre paréntesis se calcula automáticamente en cada generación del dashboard.
+
+### Gráfico de barras
+Muestra cuántas entidades se han autorizado en los **últimos 90 días** según el **Tipo de Servicio** (Asesoría de Inversión, Gestión de Carteras, Corredor de Valores, etc.), ordenadas de mayor a menor. El título indica la fecha de inicio del período entre paréntesis.
+
+### Tabla: Nuevas Entidades Autorizadas
+Lista todas las entidades con resolución "AUTORIZA LA PRESTACIÓN" vigentes desde enero 2024, agrupadas por mes. Incluye:
+- Fecha de la resolución (formato DD/MM/AAAA)
+- Nombre de la entidad
+- RUT y código de institución CMF
+- Tipo de servicio autorizado
+- Tipo de registro CMF
+- Estado de vigencia
+- Botón "Ver" que abre una ventana emergente con la ficha completa de la entidad (17 campos del registro oficial)
+
+**Búsqueda:** campo de texto con dos botones:
+- **Buscar** — filtra la tabla por entidad, RUT o tipo de servicio (también se activa pulsando Enter). Las cabeceras de mes sin resultados se ocultan automáticamente.
+- **Limpiar** — borra el texto ingresado y restaura la lista completa con todos los registros disponibles.
+
+No se muestran entidades con estado "No Vigente".
+
+### Resumen por categoría y tipo de empresa
+Dos tablas de resumen que totalizan las entidades autorizadas en los **últimos 90 días** por categoría de resolución y por tipo de empresa. El título indica la fecha de inicio del período entre paréntesis.
+
+---
+
+## 3. Requisitos del servidor
+
+### 3.1 Hardware mínimo
+
+| Recurso | Mínimo | Recomendado |
+|---------|--------|-------------|
+| CPU | 1 núcleo | 2 núcleos |
+| RAM | 512 MB | 1 GB |
+| Disco | 2 GB libres | 10 GB (para datos históricos) |
+| Red | Acceso HTTPS saliente a `www.cmfchile.cl` | — |
+
+El sistema **no requiere** base de datos, servidor web ni puertos entrantes abiertos.
+
+### 3.2 Software
+
+| Componente | Versión mínima | Notas |
+|------------|---------------|-------|
+| Python | **3.10** | El código usa sintaxis de tipos `str \| None` disponible desde 3.10 |
+| pip | Incluido con Python | Para instalar dependencias |
+| Sistema Operativo | Windows Server 2016+ / Ubuntu 20.04+ / RHEL 8+ | Cualquier SO con Python 3.10+ |
+
+### 3.3 Acceso de red requerido
+
+El servidor debe poder hacer solicitudes HTTPS **salientes** a:
+
+```
+https://www.cmfchile.cl
+```
+
+Puerto 443. No se requieren puertos entrantes ni VPN especial.
+
+---
+
+## 4. Instalación paso a paso
+
+### 4.1 En Windows Server
+
+**a) Verificar Python:**
+```powershell
+python --version
+# Debe mostrar Python 3.10.x o superior
+```
+
+Si no está instalado, descargarlo desde https://www.python.org/downloads/  
+Marcar "Add Python to PATH" durante la instalación.
+
+**b) Crear carpeta del proyecto:**
+```powershell
+New-Item -ItemType Directory -Force -Path "C:\cmf-monitor"
+```
+
+**c) Copiar los archivos del proyecto** a `C:\cmf-monitor\`:
+```
+C:\cmf-monitor\
+├── scraper.py
+├── classifier.py
+├── enricher.py
+├── dashboard.py
+├── run.py
+└── requirements.txt
+```
+
+**d) Instalar dependencias Python:**
+```powershell
+cd C:\cmf-monitor
+python -m pip install -r requirements.txt
+```
+
+**e) Verificar que funciona:**
+```powershell
+python run.py
+```
+
+La primera ejecución toma entre 5 y 10 minutos. Al finalizar debe existir:
+- `C:\cmf-monitor\data\YYYY-MM-DD.json`
+- `C:\cmf-monitor\reports\dashboard.html`
+
+---
+
+### 4.2 En Linux / Ubuntu Server
+
+**a) Verificar Python:**
+```bash
+python3 --version
+# Debe mostrar Python 3.10.x o superior
+```
+
+Si no está instalado:
+```bash
+sudo apt update && sudo apt install python3 python3-pip -y
+```
+
+**b) Crear carpeta del proyecto:**
+```bash
+sudo mkdir -p /opt/cmf-monitor
+sudo chown $USER:$USER /opt/cmf-monitor
+```
+
+**c) Copiar archivos** al servidor (vía SCP, SFTP o el método habitual de la organización):
+```
+/opt/cmf-monitor/
+├── scraper.py
+├── classifier.py
+├── enricher.py
+├── dashboard.py
+├── run.py
+└── requirements.txt
+```
+
+**d) Instalar dependencias:**
+```bash
+cd /opt/cmf-monitor
+pip3 install -r requirements.txt
+```
+
+**e) Verificar:**
+```bash
+python3 run.py
+```
+
+---
+
+## 5. Ejecución diaria automática a las 5:00 AM (Santiago de Chile)
+
+### Consideración de zona horaria
+
+Santiago de Chile opera en la zona horaria **America/Santiago**:
+- **Horario de invierno (abril–octubre):** UTC−4
+- **Horario de verano (octubre–abril):** UTC−3
+
+La forma más robusta es configurar la zona horaria del sistema al valor correcto y programar la tarea en hora local. Así el cambio de horario de verano se maneja automáticamente.
+
+---
+
+### 5.1 Windows Server — Programador de tareas
+
+**Paso 1: Configurar la zona horaria del servidor a Santiago**
+
+En el Panel de Control → Fecha y hora → Zona horaria, seleccionar:
+`(UTC-04:00) Santiago`
+
+O desde PowerShell (requiere privilegios de administrador):
+```powershell
+Set-TimeZone -Id "Pacific SA Standard Time"
+```
+
+**Paso 2: Crear la tarea programada**
+
+Ejecutar en PowerShell con permisos de administrador:
+
+```powershell
+schtasks /create `
+  /tn "CMF Monitor Diario" `
+  /tr "python C:\cmf-monitor\run.py" `
+  /sc DAILY `
+  /st 05:00 `
+  /ru SYSTEM `
+  /f
+```
+
+Esto programa la ejecución **todos los días a las 05:00** en hora local del servidor (Santiago).
+
+**Para verificar que la tarea quedó registrada:**
+```powershell
+schtasks /query /tn "CMF Monitor Diario"
+```
+
+**Para ejecutarla manualmente (prueba):**
+```powershell
+schtasks /run /tn "CMF Monitor Diario"
+```
+
+**Para modificar el horario** (ejemplo: cambiar a 06:00):
+```powershell
+schtasks /change /tn "CMF Monitor Diario" /st 06:00
+```
+
+**Para eliminar la tarea:**
+```powershell
+schtasks /delete /tn "CMF Monitor Diario" /f
+```
+
+**Para ver el log de ejecución** (requiere configurar redirección de salida):
+
+Crear el archivo `C:\cmf-monitor\run_log.bat`:
+```bat
+@echo off
+python C:\cmf-monitor\run.py >> C:\cmf-monitor\logs\cmf-monitor.log 2>&1
+```
+
+Crear la carpeta de logs:
+```powershell
+New-Item -ItemType Directory -Force -Path "C:\cmf-monitor\logs"
+```
+
+Luego modificar la tarea para usar el .bat:
+```powershell
+schtasks /change /tn "CMF Monitor Diario" /tr "C:\cmf-monitor\run_log.bat"
+```
+
+---
+
+### 5.2 Linux — Cron con zona horaria de Santiago
+
+**Paso 1: Configurar la zona horaria del servidor**
+
+```bash
+sudo timedatectl set-timezone America/Santiago
+```
+
+Verificar:
+```bash
+timedatectl
+# Debe mostrar: Time zone: America/Santiago
+```
+
+**Paso 2: Crear carpeta de logs**
+
+```bash
+sudo mkdir -p /var/log/cmf-monitor
+sudo chown $USER:$USER /var/log/cmf-monitor
+```
+
+**Paso 3: Agregar la tarea al crontab**
+
+```bash
+crontab -e
+```
+
+Agregar la siguiente línea:
+
+```cron
+0 5 * * * cd /opt/cmf-monitor && /usr/bin/python3 run.py >> /var/log/cmf-monitor/cmf-monitor.log 2>&1
+```
+
+| Campo | Valor | Significado |
+|-------|-------|-------------|
+| `0 5` | 05:00 | Hora de ejecución en hora local del servidor |
+| `* *` | Cualquier mes, cualquier día del mes | — |
+| `*` | Todos los días de la semana | Incluye sábados y domingos por si CMF publica resoluciones |
+
+Como el servidor ya tiene la zona horaria configurada en America/Santiago, el cambio de horario de verano se aplica automáticamente: la tarea siempre corre a las 5:00 AM Santiago.
+
+**Para ver el log en tiempo real:**
+```bash
+tail -f /var/log/cmf-monitor/cmf-monitor.log
+```
+
+**Para ver las últimas 100 líneas:**
+```bash
+tail -100 /var/log/cmf-monitor/cmf-monitor.log
+```
+
+**Para probar la ejecución manual:**
+```bash
+cd /opt/cmf-monitor && python3 run.py
+```
+
+---
+
+## 6. Publicación del dashboard
+
+El archivo `reports/dashboard.html` es autocontenido: no requiere internet ni servidor web para abrirse localmente. Hay tres opciones de distribución:
+
+### Opción A — Carpeta compartida de red (más simple)
+
+Publicar `reports/dashboard.html` en una carpeta de red compartida (por ejemplo `\\servidor\cmf-monitor\`). Los usuarios abren el archivo directamente con su navegador.
+
+**Ventaja:** Sin configuración de servidor web.  
+**Limitación:** El usuario debe estar conectado a la red interna.
+
+### Opción B — Servidor HTTP simple con Python
+
+En el servidor, ejecutar:
+
+```bash
+# Linux (en background, permanente)
+nohup python3 -m http.server 8080 --directory /opt/cmf-monitor/reports &
+
+# Windows
+cd C:\cmf-monitor\reports
+python -m http.server 8080
+```
+
+Los usuarios acceden a `http://IP-DEL-SERVIDOR:8080/dashboard.html` desde su navegador. Abrir el puerto 8080 en el firewall del servidor.
+
+**Para iniciar automáticamente en Linux** (como servicio systemd):
+
+Crear el archivo `/etc/systemd/system/cmf-dashboard.service`:
+```ini
+[Unit]
+Description=CMF Dashboard HTTP Server
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 -m http.server 8080 --directory /opt/cmf-monitor/reports
+WorkingDirectory=/opt/cmf-monitor/reports
+Restart=always
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Activar el servicio:
+```bash
+sudo systemctl enable cmf-dashboard
+sudo systemctl start cmf-dashboard
+```
+
+### Opción C — IIS (Windows) o nginx/Apache (Linux)
+
+Configurar el servidor web existente de la organización para servir el directorio `reports/` como sitio estático. El dashboard se actualiza automáticamente cada vez que `run.py` regenera `dashboard.html`.
+
+---
+
+## 7. Estructura de archivos del proyecto
+
+```
+cmf-monitor/
+│
+├── run.py              # Punto de entrada: ejecuta los 5 pasos en secuencia
+├── scraper.py          # Descarga y parsea la tabla CMF; extrae entidad y
+│                       # tipo de servicio del texto de la resolución;
+│                       # incluye repair_entidades() para corregir históricos
+├── classifier.py       # Clasifica resoluciones por categoría
+├── enricher.py         # Busca cada entidad en CMF y obtiene: RUT completo,
+│                       # código de institución, domicilio, contacto, inscripción
+├── dashboard.py        # Genera reports/dashboard.html con panel interactivo
+├── requirements.txt    # Dependencias Python
+│
+├── data/
+│   ├── 2026-05-04.json # Datos del día (generado automáticamente)
+│   └── debug.html      # Última página HTML descargada (diagnóstico)
+│
+├── reports/
+│   └── dashboard.html  # Panel de control (generado automáticamente)
+│
+└── logs/               # (Solo Windows; en Linux: /var/log/cmf-monitor/)
+    └── cmf-monitor.log
+```
+
+### Crecimiento esperado del almacenamiento
+
+| Período | Archivos JSON | Tamaño aprox. |
+|---------|---------------|---------------|
+| 1 semana | 7 archivos | ~5 MB |
+| 1 mes | ~30 archivos | ~25 MB |
+| 1 año | ~365 archivos | ~300 MB |
+
+---
+
+## 8. Dependencias Python
+
+El archivo `requirements.txt` contiene:
+
+```
+requests        # Solicitudes HTTP al sitio CMF
+beautifulsoup4  # Parseo de HTML
+lxml            # Parser HTML (más robusto que el incluido en Python)
+```
+
+Para instalar:
+```bash
+pip install -r requirements.txt
+# o en Linux:
+pip3 install -r requirements.txt
+```
+
+---
+
+## 9. Variables configurables
+
+Estos parámetros se pueden ajustar editando los archivos Python sin conocimiento avanzado de programación:
+
+| Archivo | Variable | Valor actual | Descripción |
+|---------|----------|-------------|-------------|
+| `scraper.py` | `DIAS_HISTORICO` | `90` | Días de historia a descargar en cada ejecución |
+| `enricher.py` | `DELAY_SEG` | `2.0` | Segundos de pausa entre solicitudes al servidor CMF |
+| `enricher.py` | `TIMEOUT` | `25` | Segundos de espera máxima por solicitud HTTP |
+
+---
+
+## 10. Monitoreo y alertas
+
+### Verificar que la ejecución fue exitosa
+
+Después de cada ejecución, revisar que exista el archivo JSON del día:
+
+```powershell
+# Windows
+Test-Path "C:\cmf-monitor\data\$(Get-Date -Format 'yyyy-MM-dd').json"
+```
+
+```bash
+# Linux
+ls -lh /opt/cmf-monitor/data/$(date +%Y-%m-%d).json
+```
+
+### Alerta por correo si la ejecución falla (Linux)
+
+Agregar al crontab una segunda tarea a las 07:00 que revise si el archivo del día existe:
+
+```cron
+0 7 * * * test -f /opt/cmf-monitor/data/$(date +%Y-%m-%d).json || echo "CMF Monitor no ejecuto el $(date)" | mail -s "ALERTA CMF Monitor" ti@organizacion.cl
+```
+
+### Alerta por correo si la ejecución falla (Windows PowerShell)
+
+Crear `C:\cmf-monitor\check.ps1`:
+```powershell
+$hoy = Get-Date -Format "yyyy-MM-dd"
+$archivo = "C:\cmf-monitor\data\$hoy.json"
+if (-not (Test-Path $archivo)) {
+    Send-MailMessage `
+      -To "ti@organizacion.cl" `
+      -From "servidor@organizacion.cl" `
+      -Subject "ALERTA: CMF Monitor no ejecuto el $hoy" `
+      -SmtpServer "smtp.organizacion.cl"
+}
+```
+
+Agregar una segunda tarea programada a las 07:00:
+```powershell
+schtasks /create `
+  /tn "CMF Monitor Verificacion" `
+  /tr "powershell -File C:\cmf-monitor\check.ps1" `
+  /sc DAILY `
+  /st 07:00 `
+  /ru SYSTEM `
+  /f
+```
+
+---
+
+## 11. Resolución de problemas comunes
+
+| Síntoma | Causa probable | Solución |
+|---------|---------------|----------|
+| `ModuleNotFoundError: requests` | Dependencias no instaladas | Ejecutar `pip install -r requirements.txt` |
+| `No se encontró ninguna tabla` | CMF cambió el HTML de su página | Revisar `data/debug.html`; ajustar `scraper.py` |
+| `ConnectTimeoutError` | CMF no responde o hay rate limiting | El `enricher.py` reintenta automáticamente; si persiste, aumentar `DELAY_SEG` |
+| Entidad aparece sin nombre ni RUT | Texto de la resolución no coincide con el patrón esperado | Revisar el campo `resolucion` en el JSON del día; el patrón se puede extender en `scraper.py` |
+| JSON del día está vacío o con pocas resoluciones | No hay resoluciones recientes en CMF | Normal en períodos de baja actividad |
+| Dashboard desactualizado | La tarea programada no corrió | Verificar el log y ejecutar `python run.py` manualmente |
+| Error de codificación en Windows | Terminal Windows no muestra UTF-8 | Normal en la consola; el archivo dashboard.html se genera correctamente en UTF-8 |
+
+---
+
+## 12. Fuente de datos
+
+**Organismo:** Comisión para el Mercado Financiero (CMF Chile)  
+**URL principal:** `https://www.cmfchile.cl/institucional/resoluciones/resoluciones_mercados_entidad.php`  
+**URL de búsqueda:** `https://www.cmfchile.cl/institucional/mercados/consulta_busqueda.php`  
+**URL de detalle:** `https://www.cmfchile.cl/institucional/mercados/entidad.php`  
+
+El sistema consume únicamente páginas HTML públicas del sitio de la CMF. No utiliza APIs privadas, credenciales de acceso ni scraping agresivo. Las pausas incorporadas respetan las buenas prácticas de acceso a sitios gubernamentales.
+
+---
+
+## 13. Resumen para el equipo de TI
+
+Para poner en producción este sistema en un servidor con acceso a internet, los pasos son:
+
+1. **Instalar Python 3.10+** en el servidor (Windows o Linux)
+2. **Copiar los 5 archivos** del proyecto a una carpeta dedicada
+3. **Instalar 3 dependencias** con un solo comando (`pip install -r requirements.txt`)
+4. **Configurar la zona horaria** del servidor a `America/Santiago`
+5. **Programar una tarea diaria** a las 05:00 AM que ejecute `python run.py`
+6. **Compartir el archivo** `reports/dashboard.html` por carpeta de red o servidor web
+
+No se requiere base de datos, Docker, nginx ni ninguna infraestructura adicional. El único requisito de red es acceso HTTPS saliente al sitio de la CMF (puerto 443).
+
+---
+
+*Documento generado en Mayo 2026. Para consultas sobre esta aplicación, contactar al periodista responsable del proyecto.*
