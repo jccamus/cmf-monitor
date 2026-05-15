@@ -1,4 +1,7 @@
-﻿data/
+﻿# data/ se trackea para que el cron diario de GitHub Actions herede los JSON
+# enriquecidos de corridas anteriores (persistencia incremental en scraper.py).
+# Solo se ignoran los dumps HTML de diagnóstico, que son pesados y volátiles.
+data/debug*.html
 reports/
 logs/
 *.pyc

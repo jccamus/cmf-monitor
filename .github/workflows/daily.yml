@@ -1,0 +1,79 @@
+name: Monitoreo CMF diario
+
+# Corre el pipeline (scraper + classifier + enricher + dashboard) una vez al día,
+# commitea los JSON enriquecidos de vuelta al repo (para que la persistencia
+# incremental funcione entre corridas) y publica el dashboard en GitHub Pages.
+on:
+  schedule:
+    # 09:00 UTC = 05:00 Santiago en invierno (UTC-4, abr-oct) y 06:00 en verano
+    # (UTC-3, oct-abr). GitHub Actions cron es siempre UTC y no entiende DST;
+    # como la tarea solo necesita correr una vez al día, esto es aceptable.
+    - cron: '0 9 * * *'
+  # Disparable a mano desde la pestaña "Actions" del repo.
+  workflow_dispatch:
+
+permissions:
+  contents: write   # para que el job pueda commitear data/ de vuelta
+  pages: write      # para publicar el dashboard en GitHub Pages
+  id-token: write   # requerido por actions/deploy-pages
+
+# Evita que dos corridas se solapen y se pisen el commit/push.
+concurrency:
+  group: daily-cmf
+  cancel-in-progress: false
+
+jobs:
+  pipeline:
+    name: Scrape + enrich + dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Correr pipeline completo
+        run: python run.py
+
+      - name: Commitear data/ actualizado
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --staged --quiet; then
+            echo "Sin cambios en data/; nada que commitear."
+          else
+            FECHA=$(TZ='America/Santiago' date +%Y-%m-%d)
+            git commit -m "data: scrape automático ${FECHA}"
+            git push
+          fi
+
+      - name: Preparar artefacto para Pages
+        # Pages sirve 'index.html' por defecto en la raíz del sitio.
+        run: cp reports/dashboard.html reports/index.html
+
+      - name: Subir artefacto de Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: reports
+
+  deploy:
+    name: Publicar en GitHub Pages
+    needs: pipeline
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy a GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
