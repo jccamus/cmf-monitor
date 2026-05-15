@@ -89,21 +89,44 @@ El sistema **no requiere** base de datos, servidor web ni puertos entrantes abie
 
 ### 3.3 Acceso de red requerido
 
-El servidor debe poder hacer solicitudes HTTPS **salientes** a:
+El servidor debe poder hacer las siguientes conexiones **salientes** (no se requieren puertos entrantes ni VPN especial):
 
-```
-https://www.cmfchile.cl
-```
+| Destino | Puerto | Propósito |
+|---------|--------|-----------|
+| `www.cmfchile.cl` (HTTPS) | 443 | Scraping de resoluciones y registro CMF |
+| Servidor SMTP de la organización | 587 (STARTTLS) o 465 (SSL) o 25 | Envío de notificaciones por correo (ver §14) |
 
-Puerto 443. No se requieren puertos entrantes ni VPN especial.
+Si el dashboard se va a servir desde el mismo equipo, también hay que abrir el puerto **entrante** que se use para HTTP (típicamente 8080) hacia la red interna.
 
 ---
 
 ## 4. Instalación paso a paso
 
+### 4.0 Qué archivos van al servidor
+
+La forma recomendada es **clonar la rama `server` del repositorio**, que trae exactamente lo necesario. Si copias archivos a mano, esta es la lista:
+
+| Archivo / carpeta | ¿Subir al servidor? | Por qué |
+|-------------------|---------------------|---------|
+| `run.py`, `scraper.py`, `classifier.py`, `enricher.py`, `tareas.py`, `mailer.py`, `config.py`, `dashboard.py` | **Sí** | Son el código del pipeline. |
+| `templates/` (4 archivos: `mail_nuevas.html`, `mail_nuevas.txt`, `mail_asignados.html`, `mail_asignados.txt`) | **Sí** | Contienen el cuerpo editable de los dos correos. |
+| `requirements.txt` | **Sí** | Lista de dependencias Python. |
+| `INSTALACION.md`, `CLAUDE.md` | Opcional | Documentación. Útil de referencia, no obligatoria para que funcione. |
+| `data/_estado_codigos.json` | **Sí, si quieres arrancar sin un correo gigante** | Es la memoria entre corridas. Sin este archivo, el primer cron mandará un correo con todas las entidades pendientes como "nuevas". Subiendo el del repo, arrancas con las pendientes ya conocidas. |
+| `data/YYYY-MM-DD.json` (varios) | Recomendable | Histórico de scraping. Sirve para que el dashboard arranque con datos desde el día 1 y para que la persistencia incremental del scraper aproveche el enriquecimiento previo. |
+| `data/debug*.html` | **No** | Dumps HTML de diagnóstico. Pesados (~5 MB) y se regeneran solos. |
+| `reports/*` | **No** | Se regeneran en cada corrida (`dashboard.html`, `tareas_*.json`, `preview_*.html`). |
+| `__pycache__/`, `*.pyc` | **No** | Caché de Python. Se regeneran. |
+| `.github/`, `.git/`, `.claude/`, `.gitignore` | **No subir manualmente** | Metadata del repo y del workflow de GitHub. No aplica en deploy auto-hospedado. |
+| `Propuesta.txt` | **No** | Documento personal del proyecto, no es código. |
+
+**Recomendación rápida**: clona el repo y dejá que git resuelva qué viene y qué no.
+
+---
+
 ### 4.1 En Windows Server
 
-**a) Verificar Python:**
+**a) Verificar Python 3.10+:**
 ```powershell
 python --version
 # Debe mostrar Python 3.10.x o superior
@@ -112,27 +135,21 @@ python --version
 Si no está instalado, descargarlo desde https://www.python.org/downloads/  
 Marcar "Add Python to PATH" durante la instalación.
 
-**b) Crear carpeta del proyecto:**
+**b) Obtener el código (opción recomendada: `git clone`):**
 ```powershell
-New-Item -ItemType Directory -Force -Path "C:\cmf-monitor"
+# Si Git está instalado:
+git clone -b server https://github.com/jccamus/cmf-monitor.git C:\cmf-monitor
 ```
 
-**c) Copiar los archivos del proyecto** a `C:\cmf-monitor\`:
-```
-C:\cmf-monitor\
-├── scraper.py
-├── classifier.py
-├── enricher.py
-├── dashboard.py
-├── run.py
-└── requirements.txt
-```
+O alternativamente, descargar el ZIP de la rama `server` desde GitHub y descomprimir en `C:\cmf-monitor\`. La estructura final debe verse como §7.
 
-**d) Instalar dependencias Python:**
+**c) Instalar dependencias Python:**
 ```powershell
 cd C:\cmf-monitor
 python -m pip install -r requirements.txt
 ```
+
+**d) Configurar las variables de entorno SMTP** (ver §14.3). Sin esto, los correos no se envían — el resto del pipeline sí funciona.
 
 **e) Verificar que funciona:**
 ```powershell
@@ -142,44 +159,38 @@ python run.py
 La primera ejecución toma entre 5 y 10 minutos. Al finalizar debe existir:
 - `C:\cmf-monitor\data\YYYY-MM-DD.json`
 - `C:\cmf-monitor\reports\dashboard.html`
+- Si hay novedades, se enviaron correos a los destinatarios configurados.
 
 ---
 
 ### 4.2 En Linux / Ubuntu Server
 
-**a) Verificar Python:**
+**a) Verificar Python 3.10+:**
 ```bash
 python3 --version
-# Debe mostrar Python 3.10.x o superior
 ```
 
 Si no está instalado:
 ```bash
-sudo apt update && sudo apt install python3 python3-pip -y
+sudo apt update && sudo apt install python3 python3-pip git -y
 ```
 
-**b) Crear carpeta del proyecto:**
+**b) Crear carpeta del proyecto y obtener el código:**
 ```bash
 sudo mkdir -p /opt/cmf-monitor
 sudo chown $USER:$USER /opt/cmf-monitor
+git clone -b server https://github.com/jccamus/cmf-monitor.git /opt/cmf-monitor
 ```
 
-**c) Copiar archivos** al servidor (vía SCP, SFTP o el método habitual de la organización):
-```
-/opt/cmf-monitor/
-├── scraper.py
-├── classifier.py
-├── enricher.py
-├── dashboard.py
-├── run.py
-└── requirements.txt
-```
+Si no es posible usar git (red restringida), copiar los archivos listados en §4.0 vía SCP/SFTP a `/opt/cmf-monitor/`, manteniendo la subcarpeta `templates/`.
 
-**d) Instalar dependencias:**
+**c) Instalar dependencias:**
 ```bash
 cd /opt/cmf-monitor
 pip3 install -r requirements.txt
 ```
+
+**d) Configurar las variables de entorno SMTP** (ver §14.2). Sin esto, los correos no se envían.
 
 **e) Verificar:**
 ```bash
@@ -214,6 +225,8 @@ Set-TimeZone -Id "Pacific SA Standard Time"
 
 **Paso 2: Crear la tarea programada**
 
+> **Prerrequisito**: las variables SMTP de §14.3 ya deben estar definidas como **Variables de Sistema** (no de usuario), porque la tarea corre como `SYSTEM`.
+
 Ejecutar en PowerShell con permisos de administrador:
 
 ```powershell
@@ -226,7 +239,7 @@ schtasks /create `
   /f
 ```
 
-Esto programa la ejecución **todos los días a las 05:00** en hora local del servidor (Santiago).
+Esto programa la ejecución **todos los días a las 05:00** en hora local del servidor (Santiago). `SYSTEM` hereda automáticamente las variables de sistema definidas en §14.3.
 
 **Para verificar que la tarea quedó registrada:**
 ```powershell
@@ -289,16 +302,33 @@ sudo mkdir -p /var/log/cmf-monitor
 sudo chown $USER:$USER /var/log/cmf-monitor
 ```
 
-**Paso 3: Agregar la tarea al crontab**
+**Paso 3: Crear el wrapper que carga las variables SMTP**
+
+El cron NO hereda las variables del shell del usuario. Para que `mailer.py` vea las credenciales SMTP, el cron debe invocar un script que cargue `/etc/cmf-monitor.env` antes de llamar a Python. Ver §14.2 para crear el archivo de entorno; luego crear el wrapper:
+
+```bash
+sudo tee /opt/cmf-monitor/run.sh > /dev/null <<'EOF'
+#!/usr/bin/env bash
+set -e
+set -a
+. /etc/cmf-monitor.env
+set +a
+cd /opt/cmf-monitor
+exec /usr/bin/python3 run.py >> /var/log/cmf-monitor/cmf-monitor.log 2>&1
+EOF
+sudo chmod +x /opt/cmf-monitor/run.sh
+```
+
+**Paso 4: Agregar la tarea al crontab**
 
 ```bash
 crontab -e
 ```
 
-Agregar la siguiente línea:
+Agregar la siguiente línea (apunta al wrapper, NO al python directo):
 
 ```cron
-0 5 * * * cd /opt/cmf-monitor && /usr/bin/python3 run.py >> /var/log/cmf-monitor/cmf-monitor.log 2>&1
+0 5 * * * /opt/cmf-monitor/run.sh
 ```
 
 | Campo | Valor | Significado |
@@ -319,7 +349,12 @@ tail -f /var/log/cmf-monitor/cmf-monitor.log
 tail -100 /var/log/cmf-monitor/cmf-monitor.log
 ```
 
-**Para probar la ejecución manual:**
+**Para probar la ejecución manual** (con las variables de entorno cargadas, igual que como corre el cron):
+```bash
+/opt/cmf-monitor/run.sh
+```
+
+Para probar sin enviar correos (omite envío si las variables SMTP no están seteadas en la sesión):
 ```bash
 cd /opt/cmf-monitor && python3 run.py
 ```
@@ -541,16 +576,17 @@ El sistema consume únicamente páginas HTML públicas del sitio de la CMF. No u
 
 ## 13. Resumen para el equipo de TI
 
-Para poner en producción este sistema en un servidor con acceso a internet, los pasos son:
+Para poner en producción este sistema en un servidor propio, los pasos son:
 
-1. **Instalar Python 3.10+** en el servidor (Windows o Linux)
-2. **Copiar los 5 archivos** del proyecto a una carpeta dedicada
-3. **Instalar 3 dependencias** con un solo comando (`pip install -r requirements.txt`)
-4. **Configurar la zona horaria** del servidor a `America/Santiago`
-5. **Programar una tarea diaria** a las 05:00 AM que ejecute `python run.py`
-6. **Compartir el archivo** `reports/dashboard.html` por carpeta de red o servidor web
+1. **Instalar Python 3.10+** en el servidor (Windows o Linux).
+2. **Obtener el código** vía `git clone -b server https://github.com/jccamus/cmf-monitor.git` (o copiar los archivos listados en §4.0) a la carpeta de destino (`C:\cmf-monitor\` o `/opt/cmf-monitor/`).
+3. **Instalar 3 dependencias Python** con `pip install -r requirements.txt` (todas las demás librerías que usa el sistema vienen con la stdlib, incluido el envío SMTP).
+4. **Configurar las variables SMTP** (servidor, usuario, password, remitente, destinatarios) — ver §14. En Linux van en `/etc/cmf-monitor.env`; en Windows como Variables de Sistema.
+5. **Configurar la zona horaria** del servidor a `America/Santiago` para que el cron corra a las 5:00 AM Santiago todo el año (incluido cambio de horario de verano).
+6. **Programar la tarea diaria** a las 05:00 AM (Task Scheduler en Windows; cron + wrapper `run.sh` en Linux — §5).
+7. **Publicar el dashboard** vía servidor HTTP simple, carpeta compartida o un servidor web existente — §6.
 
-No se requiere base de datos, Docker, nginx ni ninguna infraestructura adicional. El único requisito de red es acceso HTTPS saliente al sitio de la CMF (puerto 443).
+No se requiere base de datos, Docker, nginx ni librerías SMTP de terceros. Los únicos requisitos de red son **salientes**: HTTPS a `cmfchile.cl` y SMTP a la organización (ver §3.3).
 
 ---
 
