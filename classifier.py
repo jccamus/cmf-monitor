@@ -6,6 +6,7 @@ Actualiza el mismo archivo JSON con el campo 'categoria'.
 
 import json
 import os
+import re
 import sys
 import unicodedata
 from collections import Counter
@@ -45,20 +46,23 @@ def _sin_tildes(texto: str) -> str:
     )
 
 
-# REGLAS con las palabras clave normalizadas (mayúsculas, sin tildes). Se calcula
-# una sola vez; 'clasificar' normaliza el texto de entrada de la misma forma,
-# así "FUSION" sin tilde en el origen CMF también coincide con "FUSIÓN".
-_REGLAS_NORM: list[tuple[str, list[str]]] = [
-    (categoria, [_sin_tildes(kw.upper()) for kw in keywords])
+# REGLAS compiladas: cada keyword se normaliza (mayúsculas, sin tildes) y se
+# convierte en un patrón con LÍMITE DE PALABRA al inicio (\b) para evitar que
+# "FUSIÓN" matchee a "DIFUSIÓN", o "MULTA" a "MULTIPLICA". El límite a la
+# derecha se omite a propósito: queremos que "DIRECTOR" siga matcheando
+# "DIRECTORES" o "DIRECTORA", y "MULTA" a "MULTADO".
+_REGLAS_NORM: list[tuple[str, list[re.Pattern[str]]]] = [
+    (categoria, [re.compile(r"\b" + re.escape(_sin_tildes(kw.upper())))
+                 for kw in keywords])
     for categoria, keywords in REGLAS
 ]
 
 
 def clasificar(texto: str) -> str:
     t = _sin_tildes(texto.upper())
-    for categoria, keywords in _REGLAS_NORM:
-        for kw in keywords:
-            if kw in t:
+    for categoria, patrones in _REGLAS_NORM:
+        for patron in patrones:
+            if patron.search(t):
                 return categoria
     return "otro"
 

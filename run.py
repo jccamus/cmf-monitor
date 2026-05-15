@@ -6,6 +6,8 @@ Uso:
 """
 
 import sys
+from datetime import datetime
+
 import scraper
 import classifier
 import enricher
@@ -13,7 +15,12 @@ import dashboard
 
 
 def main():
-    fecha = sys.argv[1] if len(sys.argv) > 1 else None
+    # Resolver la fecha UNA sola vez en el orquestador y pasarla explicita a
+    # cada submodulo. Si dejamos que cada uno llame a datetime.today() por su
+    # lado, una corrida que cruce medianoche escribiria scraper en
+    # YYYY-MM-DD.json y classifier intentaria abrir YYYY-MM-(DD+1).json.
+    fecha = sys.argv[1] if len(sys.argv) > 1 else datetime.today().strftime("%Y-%m-%d")
+    print(f"Fecha de la corrida: {fecha}")
 
     print("=" * 50)
     print("PASO 1 - Scraper CMF (ultimos 30 dias)")
