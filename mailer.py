@@ -36,6 +36,7 @@ COLUMNAS_NUEVAS = [
     ("entidad",          "Nombre"),
     ("rut",              "RUT"),
     ("tipo_servicio",    "Tipo de servicio"),
+    ("email",            "Email de contacto"),
 ]
 COLUMNAS_ASIGNADOS = [
     ("primera_deteccion",  "Detectado el"),
@@ -43,9 +44,11 @@ COLUMNAS_ASIGNADOS = [
     ("rut",                "RUT"),
     ("codigo_institucion", "Código asignado"),
     ("fecha_resolucion",   "Fecha resolución"),
+    ("email",              "Email de contacto"),
 ]
 
 _FECHAS = {"fecha_resolucion", "primera_deteccion"}
+_VACIOS_EMAIL = {"", "-", "---"}
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +67,15 @@ def _valor(r: dict, key: str) -> str:
     return _fmt_fecha(v) if key in _FECHAS else str(v)
 
 
+def _celda_html(r: dict, key: str, td_style: str) -> str:
+    """Renderiza una celda. Convierte el campo 'email' en un mailto: clickable."""
+    val = _valor(r, key)
+    if key == "email" and val not in _VACIOS_EMAIL:
+        esc = html.escape(val)
+        return f'<td style="{td_style}"><a href="mailto:{esc}">{esc}</a></td>'
+    return f'<td style="{td_style}">{html.escape(val)}</td>'
+
+
 def _tabla_html(filas: list[dict], columnas: list[tuple[str, str]]) -> str:
     th_style = ("text-align:left;background:#1a365d;color:white;"
                 "padding:8px 10px;border:1px solid #1a365d;font-size:13px;")
@@ -75,15 +87,46 @@ def _tabla_html(filas: list[dict], columnas: list[tuple[str, str]]) -> str:
     head = "".join(f'<th style="{th_style}">{html.escape(lbl)}</th>' for _, lbl in columnas)
     rows = []
     for r in filas:
-        cells = "".join(
-            f'<td style="{td_style}">{html.escape(_valor(r, k))}</td>'
-            for k, _ in columnas
-        )
+        cells = "".join(_celda_html(r, k, td_style) for k, _ in columnas)
         rows.append(f"<tr>{cells}</tr>")
     return (f'<table style="{table_style}">'
             f'<thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(rows)}</tbody>'
             f'</table>')
+
+
+def _contactos_html(filas: list[dict]) -> str:
+    """Bloque HTML 'Contactos disponibles' para inyectar en el cuerpo del
+    correo. Se omite si ninguna entidad tiene email."""
+    items = []
+    for r in filas:
+        email = (r.get("email") or "").strip()
+        if email in _VACIOS_EMAIL:
+            continue
+        esc_e = html.escape(email)
+        esc_n = html.escape(r.get("entidad", "(sin nombre)"))
+        items.append(f'  <li><a href="mailto:{esc_e}">{esc_e}</a> — {esc_n}</li>')
+    if not items:
+        return ""
+    return (
+        '<p style="margin:16px 0 8px"><strong>Contactos disponibles:</strong></p>\n'
+        '<ul style="margin:0 0 16px;padding-left:20px;font-size:14px">\n'
+        + "\n".join(items)
+        + "\n</ul>"
+    )
+
+
+def _contactos_texto(filas: list[dict]) -> str:
+    """Equivalente en texto plano del bloque de contactos."""
+    items = []
+    for r in filas:
+        email = (r.get("email") or "").strip()
+        if email in _VACIOS_EMAIL:
+            continue
+        items.append(f"  - {email} ({r.get('entidad', '(sin nombre)')})")
+    if not items:
+        return ""
+    return "Contactos disponibles:\n" + "\n".join(items)
 
 
 def _tabla_texto(filas: list[dict], columnas: list[tuple[str, str]]) -> str:
@@ -168,9 +211,14 @@ def _correo(
         "fecha":         fecha,
         "n":             str(len(filas)),
         "tabla":         _tabla_html(filas, columnas),
+        "contactos":     _contactos_html(filas),
         "dashboard_url": config.DASHBOARD_URL,
     }
-    contexto_txt = {**contexto_html, "tabla": _tabla_texto(filas, columnas)}
+    contexto_txt = {
+        **contexto_html,
+        "tabla":     _tabla_texto(filas, columnas),
+        "contactos": _contactos_texto(filas),
+    }
 
     asunto    = Template(asunto_tpl).safe_substitute(n=str(len(filas)), fecha=fecha)
     html_body = _renderizar(html_template, contexto_html)

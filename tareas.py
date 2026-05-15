@@ -41,6 +41,7 @@ def _resumen(r: dict, primera_deteccion: str) -> dict:
         "tipo_servicio":      r.get("tipo_servicio", ""),
         "tipo_empresa":       r.get("tipo_empresa", ""),
         "codigo_institucion": r.get("codigo_institucion", ""),
+        "email":              r.get("email", ""),
         "primera_deteccion":  primera_deteccion,
     }
 

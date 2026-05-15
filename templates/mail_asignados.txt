@@ -8,6 +8,8 @@ notificar a las áreas correspondientes.
 
 $tabla
 
+$contactos
+
 Ver el detalle completo en el dashboard:
   $dashboard_url
 
