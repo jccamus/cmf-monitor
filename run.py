@@ -9,6 +9,8 @@ import sys
 import scraper
 import classifier
 import enricher
+import tareas
+import mailer
 import dashboard
 
 
@@ -16,7 +18,7 @@ def main():
     fecha = sys.argv[1] if len(sys.argv) > 1 else None
 
     print("=" * 50)
-    print("PASO 1 - Scraper CMF (ultimos 30 dias)")
+    print("PASO 1 - Scraper CMF (ultimos 90 dias)")
     print("=" * 50)
     scraper.run(fecha)
 
@@ -40,7 +42,19 @@ def main():
 
     print()
     print("=" * 50)
-    print("PASO 4 - Dashboard")
+    print("PASO 4 - Tareas (transiciones de codigo de institucion)")
+    print("=" * 50)
+    novedades = tareas.run(fecha)
+
+    print()
+    print("=" * 50)
+    print("PASO 5 - Notificaciones por correo")
+    print("=" * 50)
+    mailer.notificar(novedades)
+
+    print()
+    print("=" * 50)
+    print("PASO 6 - Dashboard")
     print("=" * 50)
     path = dashboard.run()
 

@@ -9,7 +9,7 @@
 
 ## 1. Qué hace este sistema
 
-Cada día, el sistema ejecuta cinco pasos en secuencia:
+Cada día, el sistema ejecuta los siguientes pasos en secuencia:
 
 | Paso | Script | Qué hace | Tiempo aprox. |
 |------|--------|----------|---------------|
@@ -17,7 +17,9 @@ Cada día, el sistema ejecuta cinco pasos en secuencia:
 | 1.5 | `scraper.py` | Repara entidades que quedaron vacías en archivos históricos (idempotente, no re-procesa si ya está correcto) | < 5 seg |
 | 2 | `classifier.py` | Clasifica cada resolución por categoría | < 5 seg |
 | 3 | `enricher.py` | Consulta el registro CMF por cada entidad nueva: obtiene RUT, código de institución, domicilio, contacto, etc. | 3–8 min (*) |
-| 4 | `dashboard.py` | Genera `reports/dashboard.html` con panel de control interactivo | < 5 seg |
+| 4 | `tareas.py` | Detecta transiciones de código (entidades que entran o salen de la lista "sin código") y escribe `reports/tareas_*.json` | < 1 seg |
+| 5 | `mailer.py` | Envía dos correos vía SMTP: uno con las nuevas entidades sin código, otro con los códigos recién asignados. Solo envía si hay novedades. Ver §14 | 2–10 seg |
+| 6 | `dashboard.py` | Genera `reports/dashboard.html` con panel de control interactivo | < 5 seg |
 
 (*) El enriquecimiento respeta pausas de 2 segundos entre solicitudes para no sobrecargar el servidor CMF. Solo procesa entidades nuevas (no re-procesa las ya registradas).
 
@@ -385,22 +387,35 @@ Configurar el servidor web existente de la organización para servir el director
 ```
 cmf-monitor/
 │
-├── run.py              # Punto de entrada: ejecuta los 5 pasos en secuencia
+├── run.py              # Punto de entrada: ejecuta los 6 pasos en secuencia
 ├── scraper.py          # Descarga y parsea la tabla CMF; extrae entidad y
 │                       # tipo de servicio del texto de la resolución;
 │                       # incluye repair_entidades() para corregir históricos
 ├── classifier.py       # Clasifica resoluciones por categoría
 ├── enricher.py         # Busca cada entidad en CMF y obtiene: RUT completo,
 │                       # código de institución, domicilio, contacto, inscripción
+├── tareas.py           # Detecta transiciones de código entre corridas
+├── mailer.py           # Envía los dos correos vía SMTP (stdlib, sin deps)
+├── config.py           # Lee las variables de entorno (SMTP, destinatarios, etc.)
 ├── dashboard.py        # Genera reports/dashboard.html con panel interactivo
 ├── requirements.txt    # Dependencias Python
 │
+├── templates/          # Plantillas editables de los correos (ver §14)
+│   ├── mail_nuevas.html
+│   ├── mail_nuevas.txt
+│   ├── mail_asignados.html
+│   └── mail_asignados.txt
+│
 ├── data/
-│   ├── 2026-05-04.json # Datos del día (generado automáticamente)
-│   └── debug.html      # Última página HTML descargada (diagnóstico)
+│   ├── 2026-05-04.json       # Datos del día (generado automáticamente)
+│   ├── _estado_codigos.json  # Memoria entre corridas (qué entidades estaban
+│   │                         # sin código en la corrida anterior). No borrar.
+│   └── debug.html            # Última página HTML descargada (diagnóstico)
 │
 ├── reports/
-│   └── dashboard.html  # Panel de control (generado automáticamente)
+│   ├── dashboard.html              # Panel de control (generado automáticamente)
+│   ├── tareas_nuevas_sin_codigo.json   # Solo si hay novedades hoy
+│   └── tareas_recien_asignados.json    # Solo si hay novedades hoy
 │
 └── logs/               # (Solo Windows; en Linux: /var/log/cmf-monitor/)
     └── cmf-monitor.log
@@ -536,6 +551,185 @@ Para poner en producción este sistema en un servidor con acceso a internet, los
 6. **Compartir el archivo** `reports/dashboard.html` por carpeta de red o servidor web
 
 No se requiere base de datos, Docker, nginx ni ninguna infraestructura adicional. El único requisito de red es acceso HTTPS saliente al sitio de la CMF (puerto 443).
+
+---
+
+## 14. Configuración de notificaciones por correo
+
+El sistema envía **dos correos independientes** cuando hay novedades respecto a la corrida anterior:
+
+| Correo | Cuándo | Destinatario configurable en |
+|--------|--------|------------------------------|
+| **Nuevas entidades sin código** | Entidad recién detectada como autorizada y aún sin código de institución | `CMF_MAIL_TO_NUEVAS` |
+| **Códigos recién asignados** | Entidad que en la corrida anterior estaba pendiente y ahora tiene código asignado | `CMF_MAIL_TO_ASIGNADOS` |
+
+Si en una corrida no hay novedades de un tipo, ese correo simplemente **no se envía** (no es resumen diario; es notificación por evento).
+
+### 14.1 Variables de entorno
+
+| Variable | Descripción | Default |
+|----------|-------------|---------|
+| `CMF_SMTP_HOST` | Servidor SMTP de la organización | (vacío → no se envía) |
+| `CMF_SMTP_PORT` | Puerto SMTP (25, 465 o 587) | `587` |
+| `CMF_SMTP_USER` | Usuario para autenticación | (vacío) |
+| `CMF_SMTP_PASS` | Contraseña | (vacío) |
+| `CMF_SMTP_TLS` | `starttls` / `ssl` / `none` | `starttls` |
+| `CMF_MAIL_FROM` | Remitente (puede incluir nombre: `CMF Monitor <cmf@org.cl>`) | (vacío → no se envía) |
+| `CMF_MAIL_TO_NUEVAS` | Destinatario(s) del correo 1, separados por coma | (vacío → correo 1 se omite) |
+| `CMF_MAIL_TO_ASIGNADOS` | Destinatario(s) del correo 2, separados por coma | (vacío → correo 2 se omite) |
+| `CMF_MAIL_SUBJECT_NUEVAS` | Asunto del correo 1 (acepta `$n` y `$fecha`) | Ver `config.py` |
+| `CMF_MAIL_SUBJECT_ASIGNADOS` | Asunto del correo 2 (acepta `$n` y `$fecha`) | Ver `config.py` |
+| `CMF_DASHBOARD_URL` | URL del dashboard, va al pie del correo | `http://localhost:8080/` |
+
+**Si faltan `CMF_SMTP_HOST` o `CMF_MAIL_FROM`, el sistema no intenta enviar correo y el pipeline sigue corriendo normalmente** (útil para entornos de prueba).
+
+---
+
+### 14.2 Configuración en Linux (archivo de entorno + wrapper)
+
+**Paso 1: Crear el archivo de configuración** `/etc/cmf-monitor.env` (modo 600, dueño root, porque contiene la contraseña):
+
+```bash
+sudo tee /etc/cmf-monitor.env > /dev/null <<'EOF'
+CMF_SMTP_HOST=smtp.miorganizacion.cl
+CMF_SMTP_PORT=587
+CMF_SMTP_USER=cmf-monitor@miorganizacion.cl
+CMF_SMTP_PASS=cambiar-por-la-real
+CMF_SMTP_TLS=starttls
+CMF_MAIL_FROM=CMF Monitor <cmf-monitor@miorganizacion.cl>
+CMF_MAIL_TO_NUEVAS=registro@miorganizacion.cl
+CMF_MAIL_TO_ASIGNADOS=basedatos@miorganizacion.cl
+CMF_DASHBOARD_URL=http://servidor.interno:8080/
+EOF
+
+sudo chmod 600 /etc/cmf-monitor.env
+sudo chown root:root /etc/cmf-monitor.env
+```
+
+**Paso 2: Crear el wrapper `/opt/cmf-monitor/run.sh`** que carga las variables antes de ejecutar Python:
+
+```bash
+sudo tee /opt/cmf-monitor/run.sh > /dev/null <<'EOF'
+#!/usr/bin/env bash
+set -e
+set -a               # exporta todas las variables que defina el archivo
+. /etc/cmf-monitor.env
+set +a
+cd /opt/cmf-monitor
+exec /usr/bin/python3 run.py >> /var/log/cmf-monitor/cmf-monitor.log 2>&1
+EOF
+
+sudo chmod +x /opt/cmf-monitor/run.sh
+```
+
+**Paso 3: Modificar el crontab** (ver §5.2) para apuntar al wrapper en vez de a Python directo:
+
+```cron
+0 5 * * * /opt/cmf-monitor/run.sh
+```
+
+Para cambiar contraseñas o destinatarios después: simplemente edita `/etc/cmf-monitor.env` con `sudo nano`. La próxima corrida del cron usa el valor nuevo, sin reiniciar nada.
+
+---
+
+### 14.3 Configuración en Windows Server (variables de sistema)
+
+En Windows, las variables de sistema son heredadas automáticamente por las tareas programadas que corren como `SYSTEM`, así que no hace falta wrapper.
+
+**Vía PowerShell con privilegios de administrador** (una sola vez, durante la instalación):
+
+```powershell
+[Environment]::SetEnvironmentVariable("CMF_SMTP_HOST", "smtp.miorganizacion.cl", "Machine")
+[Environment]::SetEnvironmentVariable("CMF_SMTP_PORT", "587", "Machine")
+[Environment]::SetEnvironmentVariable("CMF_SMTP_USER", "cmf-monitor@miorganizacion.cl", "Machine")
+[Environment]::SetEnvironmentVariable("CMF_SMTP_PASS", "cambiar-por-la-real", "Machine")
+[Environment]::SetEnvironmentVariable("CMF_SMTP_TLS", "starttls", "Machine")
+[Environment]::SetEnvironmentVariable("CMF_MAIL_FROM", "CMF Monitor <cmf-monitor@miorganizacion.cl>", "Machine")
+[Environment]::SetEnvironmentVariable("CMF_MAIL_TO_NUEVAS", "registro@miorganizacion.cl", "Machine")
+[Environment]::SetEnvironmentVariable("CMF_MAIL_TO_ASIGNADOS", "basedatos@miorganizacion.cl", "Machine")
+[Environment]::SetEnvironmentVariable("CMF_DASHBOARD_URL", "http://servidor.interno:8080/", "Machine")
+```
+
+Para cambiar un valor después, vuelves a ejecutar `[Environment]::SetEnvironmentVariable` con el valor nuevo, o lo editas desde **Panel de Control → Sistema → Configuración avanzada → Variables de entorno → Variables del sistema**.
+
+**Importante**: si la tarea programada estaba corriendo, no necesita reiniciarse — heredará el valor nuevo en su próxima ejecución. Pero la ventana de PowerShell desde donde ejecutaste estos comandos no verá los cambios hasta que la cierres y abras una nueva.
+
+---
+
+### 14.4 Editar las plantillas de los correos
+
+Las plantillas viven en `templates/`. Cada correo tiene dos archivos:
+
+```
+templates/
+├── mail_nuevas.html        # Cuerpo HTML del correo 1
+├── mail_nuevas.txt         # Cuerpo texto plano (fallback) del correo 1
+├── mail_asignados.html     # Cuerpo HTML del correo 2
+└── mail_asignados.txt      # Cuerpo texto plano (fallback) del correo 2
+```
+
+Las plantillas usan la sintaxis `$variable` (no `{variable}`) para que no entren en conflicto con CSS:
+
+| Placeholder | Lo reemplaza por |
+|-------------|------------------|
+| `$fecha` | Fecha de la corrida (DD/MM/YYYY) |
+| `$n` | Cantidad de entidades en la lista |
+| `$tabla` | Tabla con los datos (HTML o ASCII según extensión) |
+| `$dashboard_url` | URL del dashboard (de `CMF_DASHBOARD_URL`) |
+
+Cualquier otro texto, formato HTML, logo, instrucciones específicas que pongas en el `.html` se mantienen tal cual. **Editar con cualquier editor y guardar**: la próxima corrida usa el nuevo texto, no requiere reiniciar.
+
+Si la versión `.txt` no existe, se manda solo HTML (funciona, pero algunos filtros antispam castigan correos solo-HTML).
+
+---
+
+### 14.5 Asuntos personalizables
+
+Los asuntos también se controlan por variable de entorno y aceptan `$n` y `$fecha`:
+
+```bash
+CMF_MAIL_SUBJECT_NUEVAS=[CMF Monitor] $n nueva(s) entidad(es) sin código — $fecha
+CMF_MAIL_SUBJECT_ASIGNADOS=[CMF Monitor] $n código(s) recién asignado(s) — $fecha
+```
+
+Si no las defines, se usan los valores por defecto de `config.py` (los mismos que están arriba).
+
+---
+
+### 14.6 Validar el envío manualmente
+
+Antes de dejar el cron corriendo solo, conviene probar:
+
+```bash
+# Linux
+sudo -u root bash -c 'set -a; . /etc/cmf-monitor.env; set +a; cd /opt/cmf-monitor && python3 run.py'
+
+# Windows (con la sesión que ya ve las env vars)
+cd C:\cmf-monitor
+python run.py
+```
+
+En el output del paso 5 deberías ver una de estas cuatro líneas por correo:
+
+| Línea | Significado |
+|-------|-------------|
+| `Correo 1 (nuevas sin código): sin novedades, no se envía correo.` | Todo OK; no hubo cambios desde la corrida anterior. |
+| `Correo 1 (nuevas sin código): enviando '...' a ...` → `OK` | Enviado correctamente. |
+| `Correo 1 (...): hay N novedad(es) pero falta destinatario...` | Falta definir `CMF_MAIL_TO_NUEVAS`. |
+| `Correo 1 (...): ERROR enviando correo: ...` | Problema SMTP (ver tabla abajo). |
+
+---
+
+### 14.7 Problemas SMTP frecuentes
+
+| Error | Causa típica | Solución |
+|-------|--------------|----------|
+| `Connection refused` | Puerto bloqueado por firewall o servidor SMTP no acepta conexiones desde el servidor | Verificar firewall de salida y rangos IP autorizados en el servidor SMTP |
+| `Authentication failed` | Usuario o contraseña incorrectos, o el servidor requiere App Password en vez del password normal | Confirmar credenciales; en Gmail/Office365 generar App Password |
+| `Sender address not allowed` | El SMTP no permite enviar como esa dirección `From` | Usar como `CMF_MAIL_FROM` la misma dirección que `CMF_SMTP_USER` |
+| `STARTTLS extension not supported` | El servidor usa SSL directo (no STARTTLS) | Cambiar `CMF_SMTP_TLS=ssl` y `CMF_SMTP_PORT=465` |
+| `SSL: WRONG_VERSION_NUMBER` | Configuración TLS al revés | Probar `CMF_SMTP_TLS=starttls` con puerto 587, o `ssl` con 465 |
+| El correo llega a la carpeta de spam | Falta SPF/DKIM o el remitente es genérico | Coordinar con TI para configurar registros DNS del dominio del remitente |
 
 ---
 
