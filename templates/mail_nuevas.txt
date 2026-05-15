@@ -8,8 +8,6 @@ asignan el código. Plazo sugerido: 3 días hábiles.
 
 $tabla
 
-$contactos
-
 Ver el detalle completo en el dashboard:
   $dashboard_url
 

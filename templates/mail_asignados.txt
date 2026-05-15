@@ -10,6 +10,10 @@ $tabla
 
 $contactos
 
+Siguientes actividades:
+  1. Enviar el documento de Uso de la plataforma tecnológica CMF.
+  2. Revisión de la ficha del fiscalizado en el sitio web CMF.
+
 Ver el detalle completo en el dashboard:
   $dashboard_url
 
