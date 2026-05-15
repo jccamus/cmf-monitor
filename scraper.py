@@ -193,6 +193,56 @@ def parse(html: str) -> list[dict]:
 # Entrada principal
 # ---------------------------------------------------------------------------
 
+# Campos que el scraper recalcula en cada corrida (deterministas desde el texto
+# de 'resolucion'). El resto de claves las añaden classifier.py y enricher.py;
+# esas deben conservarse de una corrida a la siguiente.
+CAMPOS_BASE = {
+    "fecha", "numero", "entidad", "tipo_servicio",
+    "resolucion", "autoriza_prestacion", "tipo_empresa",
+}
+
+
+def _cargar_historico() -> dict[tuple[str, str], dict]:
+    """Mapa (fecha, numero) -> registro mas reciente ya guardado en data/.
+
+    Recorre los JSON en orden ascendente, asi que para cada clave queda la
+    version del archivo mas nuevo (la que tiene mas datos de enriquecimiento).
+    """
+    historico: dict[tuple[str, str], dict] = {}
+    for path in sorted(glob.glob(os.path.join(DATA_DIR, "????-??-??.json"))):
+        try:
+            with open(path, encoding="utf-8") as f:
+                prev = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        for r in prev:
+            historico[(r.get("fecha", ""), r.get("numero", ""))] = r
+    return historico
+
+
+def _fusionar_enriquecimiento(
+    records: list[dict], historico: dict[tuple[str, str], dict]
+) -> int:
+    """Copia a cada registro recien scrapeado los campos que classifier/enricher
+    ya habian calculado en corridas anteriores. Asi enricher.py vuelve a ser
+    incremental (salta lo que ya tiene 'num_inscripcion').
+    Retorna cuantas entidades conservaron sus datos de detalle."""
+    conservados = 0
+    for r in records:
+        prev = historico.get((r.get("fecha", ""), r.get("numero", "")))
+        if not prev:
+            continue
+        for k, v in prev.items():
+            if k not in CAMPOS_BASE and k not in r:
+                r[k] = v
+        # 'categoria' la trae el scraper vacia; conservar la previa si existe.
+        if prev.get("categoria"):
+            r["categoria"] = prev["categoria"]
+        if r.get("num_inscripcion"):
+            conservados += 1
+    return conservados
+
+
 def run(fecha: str | None = None) -> list[dict]:
     os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -213,12 +263,17 @@ def run(fecha: str | None = None) -> list[dict]:
     print("Parseando tabla...")
     records = parse(html)
 
-    # Filtrar por ventana de 7 días
+    # Filtrar por la ventana de DIAS_HISTORICO días
     fecha_limite = (datetime.today() - timedelta(days=DIAS_HISTORICO)).strftime("%Y-%m-%d")
     records = [r for r in records if r.get("fecha", "") >= fecha_limite]
 
+    # Conservar lo que classifier/enricher ya calcularon en corridas anteriores,
+    # para no re-clasificar ni re-scrapear el detalle de cada entidad cada día.
+    conservados = _fusionar_enriquecimiento(records, _cargar_historico())
+
     ap = [r for r in records if r["autoriza_prestacion"]]
     print(f"  {len(records)} resoluciones (ultimos {DIAS_HISTORICO} dias), {len(ap)} AUTORIZA LA PRESTACION")
+    print(f"  {conservados} entidad(es) ya tenian datos de detalle (se conservan)")
 
     if fecha is None:
         fecha = datetime.today().strftime("%Y-%m-%d")

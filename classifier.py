@@ -7,6 +7,7 @@ Actualiza el mismo archivo JSON con el campo 'categoria'.
 import json
 import os
 import sys
+import unicodedata
 from collections import Counter
 from datetime import datetime
 
@@ -36,9 +37,26 @@ REGLAS: list[tuple[str, list[str]]] = [
 ]
 
 
+def _sin_tildes(texto: str) -> str:
+    """Quita tildes/diacríticos para que el match no dependa de la acentuación."""
+    return "".join(
+        c for c in unicodedata.normalize("NFD", texto)
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+# REGLAS con las palabras clave normalizadas (mayúsculas, sin tildes). Se calcula
+# una sola vez; 'clasificar' normaliza el texto de entrada de la misma forma,
+# así "FUSION" sin tilde en el origen CMF también coincide con "FUSIÓN".
+_REGLAS_NORM: list[tuple[str, list[str]]] = [
+    (categoria, [_sin_tildes(kw.upper()) for kw in keywords])
+    for categoria, keywords in REGLAS
+]
+
+
 def clasificar(texto: str) -> str:
-    t = texto.upper()
-    for categoria, keywords in REGLAS:
+    t = _sin_tildes(texto.upper())
+    for categoria, keywords in _REGLAS_NORM:
         for kw in keywords:
             if kw in t:
                 return categoria

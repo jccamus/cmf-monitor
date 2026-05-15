@@ -71,6 +71,18 @@ def mes_nombre(ym: str) -> str:
         return ym
 
 
+def json_para_script(obj) -> str:
+    """json.dumps seguro para incrustar en un <script>: evita que un '</script>'
+    presente en los datos cierre la etiqueta, y escapa los separadores de linea
+    U+2028/U+2029 que romperian el literal JavaScript."""
+    return (
+        json.dumps(obj, ensure_ascii=False)
+        .replace("</", "<\\/")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Carga de datos
 # ---------------------------------------------------------------------------
@@ -78,7 +90,9 @@ def mes_nombre(ym: str) -> str:
 def cargar_datos() -> list[dict]:
     seen: set[tuple] = set()
     records: list[dict] = []
-    for path in sorted(glob.glob(os.path.join(DATA_DIR, "????-??-??.json"))):
+    # De más nuevo a más viejo: para cada (fecha, numero) se conserva la versión
+    # del archivo más reciente, que es la que trae los datos enriquecidos al día.
+    for path in sorted(glob.glob(os.path.join(DATA_DIR, "????-??-??.json")), reverse=True):
         with open(path, encoding="utf-8") as f:
             for r in json.load(f):
                 key = (r.get("fecha", ""), r.get("numero", ""))
@@ -101,7 +115,7 @@ def badge(categoria: str) -> str:
 def vig_html(v: str) -> str:
     if v == "Vigente":
         return '<span class="vig-ok">Vigente</span>'
-    return f'<span class="vig-no">{v or "-"}</span>' if v else ""
+    return f'<span class="vig-no">{html_lib.escape(v or "-")}</span>' if v else ""
 
 
 def tabla_resumen(counter: Counter, label_col: str) -> str:
@@ -379,8 +393,8 @@ def generar_html(records: list[dict]) -> str:
             detalles[rut] = {k: r.get(k, "") for k, _ in CAMPOS_MODAL}
             detalles[rut]["nombre_cmf"] = r.get("nombre_cmf", "")
 
-    detalles_json = json.dumps(detalles, ensure_ascii=False)
-    campos_json   = json.dumps([[k, lbl] for k, lbl in CAMPOS_MODAL], ensure_ascii=False)
+    detalles_json = json_para_script(detalles)
+    campos_json   = json_para_script([[k, lbl] for k, lbl in CAMPOS_MODAL])
 
     js = JS_TEMPLATE.format(
         detalles_json=detalles_json,
