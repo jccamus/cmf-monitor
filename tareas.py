@@ -119,6 +119,18 @@ def run(fecha: str | None = None) -> dict:
                 primera = sin_codigo_previo[rut].get("primera_deteccion", "")
                 asignados.append(_resumen(r, primera))
 
+    # Entidades que estaban pendientes en la corrida anterior pero no aparecen
+    # en el JSON de hoy: salieron de la ventana de 90 dias del scraper. Las
+    # mantenemos en el estado para no perderles el rastro; su codigo no se
+    # detectara automaticamente sin un mecanismo de re-consulta directa a CMF.
+    # (TODO: agregar un comando manual o un re-check periodico via enricher.)
+    ruts_hoy = {r["rut"] for r in autorizadas}
+    fuera_de_ventana = 0
+    for rut, previa in sin_codigo_previo.items():
+        if rut not in ruts_hoy and rut not in sin_codigo_actual:
+            sin_codigo_actual[rut] = previa
+            fuera_de_ventana += 1
+
     estado["sin_codigo"]    = sin_codigo_actual
     estado["ultima_corrida"] = fecha
     _guardar_estado(estado)
@@ -129,7 +141,8 @@ def run(fecha: str | None = None) -> dict:
 
     print(f"  {len(nuevas)} nueva(s) entidad(es) sin código (entran a la lista)")
     print(f"  {len(asignados)} entidad(es) con código recién asignado (salen de la lista)")
-    print(f"  {len(sin_codigo_actual)} entidad(es) pendientes en total")
+    print(f"  {len(sin_codigo_actual)} entidad(es) pendientes en total"
+          f" (de las cuales {fuera_de_ventana} están fuera de la ventana de 90 días)")
 
     return {"nuevas_sin_codigo": nuevas, "recien_asignados": asignados}
 
