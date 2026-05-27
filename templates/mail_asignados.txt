@@ -1,0 +1,21 @@
+Hola equipo,
+
+El monitoreo CMF del $fecha detectó que $n entidad(es) recibieron código
+de institución asignado por parte de la CMF.
+
+Por favor actualizar la base de datos interna con los códigos asignados y
+notificar a las áreas correspondientes.
+
+$tabla
+
+$contactos
+
+Siguientes actividades:
+  1. Enviar el documento de Uso de la plataforma tecnológica CMF.
+  2. Revisión de la ficha del fiscalizado en el sitio web CMF.
+
+Ver el detalle completo en el dashboard:
+  $dashboard_url
+
+---
+CMF Monitor — mensaje automático, no responder este correo.

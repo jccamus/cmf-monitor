@@ -1,3 +1,4 @@
 requests
 beautifulsoup4
 lxml
+psycopg[binary]>=3.1

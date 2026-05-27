@@ -1,542 +1,259 @@
-# Monitoreo CMF — Documentación Técnica de Instalación
+# Instalacion - Monitoreo CMF (Docker + Postgres)
 
-**Sistema:** Monitoreo CMF - Resoluciones de Autorización de Entidades  
-**Propósito:** Descarga diaria de resoluciones de la Comisión para el Mercado Financiero, clasificación automática por categoría, enriquecimiento con datos del registro oficial y generación de un panel de control HTML con información de nuevas entidades autorizadas.  
-**Audiencia:** Equipo de Tecnologías de la Información  
-**Última actualización:** Mayo 2026
+Esta es la guia de despliegue para la rama **`postgres-docker`**, que empaqueta
+todo el sistema (aplicacion, base de datos y dashboard web) en contenedores
+Docker. Una vez instalado, todo se administra con `docker compose`.
 
----
+Otras variantes disponibles en este repositorio:
 
-## 1. Qué hace este sistema
-
-Cada día, el sistema ejecuta cinco pasos en secuencia:
-
-| Paso | Script | Qué hace | Tiempo aprox. |
-|------|--------|----------|---------------|
-| 1 | `scraper.py` | Descarga las resoluciones CMF de los últimos 90 días y extrae entidad y tipo de servicio | 15–30 seg |
-| 1.5 | `scraper.py` | Repara entidades que quedaron vacías en archivos históricos (idempotente, no re-procesa si ya está correcto) | < 5 seg |
-| 2 | `classifier.py` | Clasifica cada resolución por categoría | < 5 seg |
-| 3 | `enricher.py` | Consulta el registro CMF por cada entidad nueva: obtiene RUT, código de institución, domicilio, contacto, etc. | 3–8 min (*) |
-| 4 | `dashboard.py` | Genera `reports/dashboard.html` con panel de control interactivo | < 5 seg |
-
-(*) El enriquecimiento respeta pausas de 2 segundos entre solicitudes para no sobrecargar el servidor CMF. Solo procesa entidades nuevas (no re-procesa las ya registradas).
-
-**Salidas del sistema:**
-- `data/YYYY-MM-DD.json` — datos del día en formato JSON
-- `reports/dashboard.html` — panel de control autocontenido (no requiere servidor web para visualizarse)
+| Rama              | Almacenamiento  | Scheduler        | Notificaciones |
+|-------------------|-----------------|------------------|----------------|
+| `main`            | JSON en repo    | GitHub Actions   | (sin correo)   |
+| `server`          | JSON en disco   | cron del sistema | SMTP propio    |
+| `postgres-docker` | **Postgres**    | cron interno     | SMTP propio    |
 
 ---
 
-## 2. Qué muestra el dashboard
+## 1. Requisitos del servidor
 
-El archivo `reports/dashboard.html` es un panel de control interactivo con las siguientes secciones:
+- Sistema operativo Linux (probado en Debian/Ubuntu) o Windows con WSL2.
+- **Docker Engine 24+** y **Docker Compose v2** (`docker compose ...`,
+  no `docker-compose`).
+  - Instalacion oficial: https://docs.docker.com/engine/install/
+- Acceso saliente HTTPS a `www.cmfchile.cl` (puerto 443).
+- Si vas a enviar correos: acceso saliente al servidor SMTP corporativo
+  (tipicamente 587/TLS o 465/SSL).
+- 1 GB RAM y 2 GB de disco libres son suficientes con holgura.
 
-### Tarjetas de resumen (parte superior)
-| Tarjeta | Descripción |
-|---------|-------------|
-| Resoluciones en los últimos 90 días (desde DD/MM/AAAA) | Total de resoluciones CMF emitidas en los 90 días anteriores a la fecha de generación |
-| Entidades autorizadas en los últimos 90 días (desde DD/MM/AAAA) | Total de resoluciones "AUTORIZA LA PRESTACIÓN" vigentes en los últimos 90 días |
-| Sin código de institución en los últimos 90 días (desde DD/MM/AAAA) | Entidades autorizadas en los últimos 90 días que aún no tienen código de institución CMF asignado |
-
-La fecha entre paréntesis se calcula automáticamente en cada generación del dashboard.
-
-### Gráfico de barras
-Muestra cuántas entidades se han autorizado en los **últimos 90 días** según el **Tipo de Servicio** (Asesoría de Inversión, Gestión de Carteras, Corredor de Valores, etc.), ordenadas de mayor a menor. El título indica la fecha de inicio del período entre paréntesis.
-
-### Tabla: Nuevas Entidades Autorizadas
-Lista todas las entidades con resolución "AUTORIZA LA PRESTACIÓN" vigentes desde enero 2024, agrupadas por mes. Incluye:
-- Fecha de la resolución (formato DD/MM/AAAA)
-- Nombre de la entidad
-- RUT y código de institución CMF
-- Tipo de servicio autorizado
-- Tipo de registro CMF
-- Estado de vigencia
-- Botón "Ver" que abre una ventana emergente con la ficha completa de la entidad (17 campos del registro oficial)
-
-**Búsqueda:** campo de texto con dos botones:
-- **Buscar** — filtra la tabla por entidad, RUT o tipo de servicio (también se activa pulsando Enter). Las cabeceras de mes sin resultados se ocultan automáticamente.
-- **Limpiar** — borra el texto ingresado y restaura la lista completa con todos los registros disponibles.
-
-No se muestran entidades con estado "No Vigente".
-
-### Resumen por categoría y tipo de empresa
-Dos tablas de resumen que totalizan las entidades autorizadas en los **últimos 90 días** por categoría de resolución y por tipo de empresa. El título indica la fecha de inicio del período entre paréntesis.
+No se requiere instalar Python ni Postgres en el host: Docker provee ambos.
 
 ---
 
-## 3. Requisitos del servidor
+## 2. Que se sube al servidor
 
-### 3.1 Hardware mínimo
+Solo necesitas el contenido de esta rama clonado en el servidor. Los
+archivos relevantes son:
 
-| Recurso | Mínimo | Recomendado |
-|---------|--------|-------------|
-| CPU | 1 núcleo | 2 núcleos |
-| RAM | 512 MB | 1 GB |
-| Disco | 2 GB libres | 10 GB (para datos históricos) |
-| Red | Acceso HTTPS saliente a `www.cmfchile.cl` | — |
+| Archivo / carpeta        | Para que sirve                                                | Subir? |
+|--------------------------|---------------------------------------------------------------|--------|
+| `Dockerfile`             | Construye la imagen de la app                                 | Si     |
+| `docker-compose.yml`     | Define los 3 servicios (db, app, web)                         | Si     |
+| `docker-entrypoint.sh`   | Espera la DB, migra JSONs, lanza cron                         | Si     |
+| `run-cron.sh`            | Wrapper que el cron interno invoca a diario                   | Si     |
+| `nginx.conf`             | Sirve `dashboard.html` en el puerto del host                  | Si     |
+| `requirements.txt`       | Dependencias Python                                           | Si     |
+| `schema.sql`             | DDL de las tablas (se aplica solo si no existen)              | Si     |
+| `*.py`                   | Codigo del pipeline (incluye `healthcheck.py` para Docker)    | Si     |
+| `templates/*.html` y `.txt` | Cuerpo de los correos                                      | Si     |
+| `data/*.json`            | Historico para la migracion inicial                           | Si (1) |
+| `.env.example`           | Plantilla del archivo `.env`                                  | Si     |
+| `.env`                   | Credenciales reales                                           | **NO** (2) |
+| `.git/`                  | Historia del repo (no influye en runtime)                     | Opcional |
+| `INSTALACION.md`, `CLAUDE.md`, `Propuesta.txt` | Documentacion                           | Opcional |
 
-El sistema **no requiere** base de datos, servidor web ni puertos entrantes abiertos.
+(1) `data/*.json` queda en el repo para que `migrate.py` los cargue en la
+DB la primera vez. Despues de la primera corrida exitosa puedes borrarlos
+del repo si quieres (la fuente de verdad pasa a ser Postgres).
 
-### 3.2 Software
+(2) `.env` contiene credenciales SMTP y la contrasena de la DB; debe
+generarse manualmente en el servidor y nunca commitearse.
 
-| Componente | Versión mínima | Notas |
-|------------|---------------|-------|
-| Python | **3.10** | El código usa sintaxis de tipos `str \| None` disponible desde 3.10 |
-| pip | Incluido con Python | Para instalar dependencias |
-| Sistema Operativo | Windows Server 2016+ / Ubuntu 20.04+ / RHEL 8+ | Cualquier SO con Python 3.10+ |
+La forma recomendada de "subir" todo es clonar la rama directamente:
 
-### 3.3 Acceso de red requerido
-
-El servidor debe poder hacer solicitudes HTTPS **salientes** a:
-
-```
-https://www.cmfchile.cl
-```
-
-Puerto 443. No se requieren puertos entrantes ni VPN especial.
-
----
-
-## 4. Instalación paso a paso
-
-### 4.1 En Windows Server
-
-**a) Verificar Python:**
-```powershell
-python --version
-# Debe mostrar Python 3.10.x o superior
-```
-
-Si no está instalado, descargarlo desde https://www.python.org/downloads/  
-Marcar "Add Python to PATH" durante la instalación.
-
-**b) Crear carpeta del proyecto:**
-```powershell
-New-Item -ItemType Directory -Force -Path "C:\cmf-monitor"
-```
-
-**c) Copiar los archivos del proyecto** a `C:\cmf-monitor\`:
-```
-C:\cmf-monitor\
-├── scraper.py
-├── classifier.py
-├── enricher.py
-├── dashboard.py
-├── run.py
-└── requirements.txt
-```
-
-**d) Instalar dependencias Python:**
-```powershell
-cd C:\cmf-monitor
-python -m pip install -r requirements.txt
-```
-
-**e) Verificar que funciona:**
-```powershell
-python run.py
-```
-
-La primera ejecución toma entre 5 y 10 minutos. Al finalizar debe existir:
-- `C:\cmf-monitor\data\YYYY-MM-DD.json`
-- `C:\cmf-monitor\reports\dashboard.html`
-
----
-
-### 4.2 En Linux / Ubuntu Server
-
-**a) Verificar Python:**
-```bash
-python3 --version
-# Debe mostrar Python 3.10.x o superior
-```
-
-Si no está instalado:
-```bash
-sudo apt update && sudo apt install python3 python3-pip -y
-```
-
-**b) Crear carpeta del proyecto:**
 ```bash
 sudo mkdir -p /opt/cmf-monitor
 sudo chown $USER:$USER /opt/cmf-monitor
+git clone -b postgres-docker https://<tu-host>/<tu-org>/cmf-monitor.git /opt/cmf-monitor
+cd /opt/cmf-monitor
 ```
 
-**c) Copiar archivos** al servidor (vía SCP, SFTP o el método habitual de la organización):
-```
-/opt/cmf-monitor/
-├── scraper.py
-├── classifier.py
-├── enricher.py
-├── dashboard.py
-├── run.py
-└── requirements.txt
+---
+
+## 3. Configurar el entorno
+
+Crea el archivo `.env` a partir del ejemplo y completa los valores:
+
+```bash
+cp .env.example .env
+nano .env       # o el editor que prefieras
 ```
 
-**d) Instalar dependencias:**
+Variables importantes:
+
+| Variable                    | Para que sirve                                       |
+|-----------------------------|------------------------------------------------------|
+| `POSTGRES_PASSWORD`         | Contrasena de la DB local (cambia el default!)       |
+| `WEB_PORT`                  | Puerto del host donde se publica el dashboard (8080) |
+| `CMF_DASHBOARD_URL`         | URL publica del dashboard (va al final del correo)   |
+| `CMF_SMTP_HOST`             | Servidor SMTP corporativo                            |
+| `CMF_SMTP_USER` / `_PASS`   | Credenciales SMTP                                    |
+| `CMF_MAIL_FROM`             | Remitente de los correos                             |
+| `CMF_MAIL_TO_NUEVAS`        | Destinatario(s) del correo "nuevas sin codigo"       |
+| `CMF_MAIL_TO_ASIGNADOS`     | Destinatario(s) del correo "codigos asignados"       |
+
+Si `CMF_SMTP_HOST` o `CMF_MAIL_FROM` quedan vacios, el pipeline omite el
+envio de correos silenciosamente (util para probar sin SMTP real).
+
+---
+
+## 4. Levantar el sistema
+
+> ### ⚠ Antes de exponer el dashboard
+>
+> El servicio `web` (nginx) **no tiene autenticacion**: cualquiera con acceso
+> al puerto `WEB_PORT` puede ver el dashboard, incluidos RUTs, emails y
+> codigos de institucion. Esto es seguro mientras `WEB_PORT` solo este
+> abierto en la red interna del servidor (loopback o LAN corporativa).
+>
+> **NO publiques el puerto hacia internet directamente.** Si necesitas acceso
+> remoto, pon delante un reverse proxy (Caddy, nginx del host o Traefik) con
+> **TLS y autenticacion basica/SSO**. Postgres tampoco se expone al host por
+> defecto y debe seguir asi.
+
+```bash
+docker compose up -d --build
+```
+
+Esto:
+
+1. Descarga `postgres:16-alpine` y `nginx:alpine`.
+2. Construye la imagen de la app (Python 3.11 + cron + tini).
+3. Arranca los 3 servicios:
+   - `db`     - Postgres en un volumen persistente (`db_data`).
+   - `app`    - en su primer arranque corre `migrate.py` para cargar los
+                JSON historicos en la DB, hace una corrida inmediata del
+                pipeline y luego inicia el cron interno (proxima ejecucion:
+                **05:00 hora de Santiago**, todos los dias).
+   - `web`    - nginx sirviendo `reports/dashboard.html` en
+                `http://<servidor>:${WEB_PORT}/`.
+
+Verificar que todo arranco bien:
+
+```bash
+docker compose ps         # los 3 servicios deben aparecer "running"/"healthy"
+docker compose logs -f app
+```
+
+En los logs de `app` deberias ver:
+
+```
+[entrypoint] Esperando a Postgres en db:5432...
+[entrypoint] Postgres listo.
+[entrypoint] Ejecutando migracion inicial (si aplica)...
+Migracion inicial de JSON -> Postgres
+  Tabla resoluciones...
+  NNN fila(s) cargadas/actualizadas.
+  Tabla estado_codigos...
+  N fila(s) cargadas/actualizadas.
+Listo.
+[entrypoint] Primera corrida del pipeline...
+==================================================
+PASO 1 - Scraper CMF (ultimos 90 dias)
+...
+```
+
+Despues abrir el dashboard en el navegador: `http://<servidor>:8080/`
+
+---
+
+## 5. Operacion diaria
+
+| Tarea                                      | Comando                                          |
+|--------------------------------------------|--------------------------------------------------|
+| Ver el estado de los servicios             | `docker compose ps`                              |
+| Seguir los logs del pipeline               | `docker compose logs -f app`                     |
+| Ver el log del cron interno                | `docker compose exec app tail -f /var/log/cmf-monitor.log` |
+| Lanzar una corrida manual                  | `docker compose exec app python run.py`          |
+| Lanzar una corrida para una fecha vieja    | `docker compose exec app python run.py 2026-05-15` |
+| Forzar re-migracion de JSONs               | `docker compose exec app python migrate.py --force` |
+| Abrir psql contra la DB                    | `docker compose exec db psql -U cmf -d cmf`      |
+| Reiniciar solo la app                      | `docker compose restart app`                     |
+| Detener todo                               | `docker compose down`                            |
+| Detener todo Y borrar la DB                | `docker compose down -v` (CUIDADO: borra el volumen) |
+
+---
+
+## 6. Respaldos
+
+El estado relevante vive en el volumen `db_data`. Para respaldarlo:
+
+```bash
+# Dump SQL (recomendado)
+docker compose exec -T db pg_dump -U cmf -d cmf > backup_$(date +%F).sql
+
+# Restaurar
+cat backup_2026-05-27.sql | docker compose exec -T db psql -U cmf -d cmf
+```
+
+El dashboard (`reports/`) y los JSONs originales (`data/`) son
+re-generables: el primero desde la DB, los segundos historicos.
+
+---
+
+## 7. Actualizaciones de codigo
+
 ```bash
 cd /opt/cmf-monitor
-pip3 install -r requirements.txt
+git pull
+docker compose build app
+docker compose up -d
 ```
 
-**e) Verificar:**
+El esquema de la DB (`schema.sql`) usa `CREATE TABLE IF NOT EXISTS`, asi
+que reconstruir la imagen no afecta los datos existentes. Si en un futuro
+introduces cambios incompatibles, agrega un script de migracion incremental.
+
+---
+
+## 8. Troubleshooting
+
+**El servicio `app` arranca pero el cron no dispara nada.**
+Verifica la TZ del contenedor:
 ```bash
-python3 run.py
+docker compose exec app date
+```
+Debe mostrar la hora local de Chile.
+
+**El primer arranque dice "ya hay filas, omitiendo migracion".**
+Es normal si la DB ya tiene datos (por ej. reinstalaste sin borrar el
+volumen). Si quieres recargar todo desde los JSON, usa
+`docker compose exec app python migrate.py --force`.
+
+**No me llega correo aunque la corrida fue exitosa.**
+1. Confirma que `CMF_SMTP_HOST` y `CMF_MAIL_FROM` esten en `.env`.
+2. Mira el log: `docker compose logs app | grep -i smtp`. Si dice
+   "SMTP no configurado", `.env` no se cargo (revisa que este en la raiz
+   del proyecto, junto al `docker-compose.yml`).
+3. Si dice "ERROR enviando correo: <X>", el SMTP rechazo la conexion.
+   Prueba con `swaks` o `python -m smtplib` desde el contenedor para
+   diagnosticar.
+4. Si no hubo "novedades" (entidades nuevas sin codigo o recien
+   asignadas), tampoco se envia correo.
+
+**Quiero ver que entidades estan pendientes ahora.**
+```bash
+docker compose exec db psql -U cmf -d cmf -c \
+   "SELECT entidad, rut, primera_deteccion FROM estado_codigos ORDER BY primera_deteccion;"
+```
+
+**El scraper fallo con error de red.**
+CMF rechazo la conexion o cambio su HTML. El raw queda en
+`/app/data/debug.html` dentro del contenedor:
+```bash
+docker compose exec app head -100 /app/data/debug.html
 ```
 
 ---
 
-## 5. Ejecución diaria automática a las 5:00 AM (Santiago de Chile)
-
-### Consideración de zona horaria
-
-Santiago de Chile opera en la zona horaria **America/Santiago**:
-- **Horario de invierno (abril–octubre):** UTC−4
-- **Horario de verano (octubre–abril):** UTC−3
-
-La forma más robusta es configurar la zona horaria del sistema al valor correcto y programar la tarea en hora local. Así el cambio de horario de verano se maneja automáticamente.
-
----
-
-### 5.1 Windows Server — Programador de tareas
-
-**Paso 1: Configurar la zona horaria del servidor a Santiago**
-
-En el Panel de Control → Fecha y hora → Zona horaria, seleccionar:
-`(UTC-04:00) Santiago`
-
-O desde PowerShell (requiere privilegios de administrador):
-```powershell
-Set-TimeZone -Id "Pacific SA Standard Time"
-```
-
-**Paso 2: Crear la tarea programada**
-
-Ejecutar en PowerShell con permisos de administrador:
-
-```powershell
-schtasks /create `
-  /tn "CMF Monitor Diario" `
-  /tr "python C:\cmf-monitor\run.py" `
-  /sc DAILY `
-  /st 05:00 `
-  /ru SYSTEM `
-  /f
-```
-
-Esto programa la ejecución **todos los días a las 05:00** en hora local del servidor (Santiago).
-
-**Para verificar que la tarea quedó registrada:**
-```powershell
-schtasks /query /tn "CMF Monitor Diario"
-```
-
-**Para ejecutarla manualmente (prueba):**
-```powershell
-schtasks /run /tn "CMF Monitor Diario"
-```
-
-**Para modificar el horario** (ejemplo: cambiar a 06:00):
-```powershell
-schtasks /change /tn "CMF Monitor Diario" /st 06:00
-```
-
-**Para eliminar la tarea:**
-```powershell
-schtasks /delete /tn "CMF Monitor Diario" /f
-```
-
-**Para ver el log de ejecución** (requiere configurar redirección de salida):
-
-Crear el archivo `C:\cmf-monitor\run_log.bat`:
-```bat
-@echo off
-python C:\cmf-monitor\run.py >> C:\cmf-monitor\logs\cmf-monitor.log 2>&1
-```
-
-Crear la carpeta de logs:
-```powershell
-New-Item -ItemType Directory -Force -Path "C:\cmf-monitor\logs"
-```
-
-Luego modificar la tarea para usar el .bat:
-```powershell
-schtasks /change /tn "CMF Monitor Diario" /tr "C:\cmf-monitor\run_log.bat"
-```
-
----
-
-### 5.2 Linux — Cron con zona horaria de Santiago
-
-**Paso 1: Configurar la zona horaria del servidor**
-
-```bash
-sudo timedatectl set-timezone America/Santiago
-```
-
-Verificar:
-```bash
-timedatectl
-# Debe mostrar: Time zone: America/Santiago
-```
-
-**Paso 2: Crear carpeta de logs**
-
-```bash
-sudo mkdir -p /var/log/cmf-monitor
-sudo chown $USER:$USER /var/log/cmf-monitor
-```
-
-**Paso 3: Agregar la tarea al crontab**
-
-```bash
-crontab -e
-```
-
-Agregar la siguiente línea:
-
-```cron
-0 5 * * * cd /opt/cmf-monitor && /usr/bin/python3 run.py >> /var/log/cmf-monitor/cmf-monitor.log 2>&1
-```
-
-| Campo | Valor | Significado |
-|-------|-------|-------------|
-| `0 5` | 05:00 | Hora de ejecución en hora local del servidor |
-| `* *` | Cualquier mes, cualquier día del mes | — |
-| `*` | Todos los días de la semana | Incluye sábados y domingos por si CMF publica resoluciones |
-
-Como el servidor ya tiene la zona horaria configurada en America/Santiago, el cambio de horario de verano se aplica automáticamente: la tarea siempre corre a las 5:00 AM Santiago.
-
-**Para ver el log en tiempo real:**
-```bash
-tail -f /var/log/cmf-monitor/cmf-monitor.log
-```
-
-**Para ver las últimas 100 líneas:**
-```bash
-tail -100 /var/log/cmf-monitor/cmf-monitor.log
-```
-
-**Para probar la ejecución manual:**
-```bash
-cd /opt/cmf-monitor && python3 run.py
-```
-
----
-
-## 6. Publicación del dashboard
-
-El archivo `reports/dashboard.html` es autocontenido: no requiere internet ni servidor web para abrirse localmente. Hay tres opciones de distribución:
-
-### Opción A — Carpeta compartida de red (más simple)
-
-Publicar `reports/dashboard.html` en una carpeta de red compartida (por ejemplo `\\servidor\cmf-monitor\`). Los usuarios abren el archivo directamente con su navegador.
-
-**Ventaja:** Sin configuración de servidor web.  
-**Limitación:** El usuario debe estar conectado a la red interna.
-
-### Opción B — Servidor HTTP simple con Python
-
-En el servidor, ejecutar:
-
-```bash
-# Linux (en background, permanente)
-nohup python3 -m http.server 8080 --directory /opt/cmf-monitor/reports &
-
-# Windows
-cd C:\cmf-monitor\reports
-python -m http.server 8080
-```
-
-Los usuarios acceden a `http://IP-DEL-SERVIDOR:8080/dashboard.html` desde su navegador. Abrir el puerto 8080 en el firewall del servidor.
-
-**Para iniciar automáticamente en Linux** (como servicio systemd):
-
-Crear el archivo `/etc/systemd/system/cmf-dashboard.service`:
-```ini
-[Unit]
-Description=CMF Dashboard HTTP Server
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/python3 -m http.server 8080 --directory /opt/cmf-monitor/reports
-WorkingDirectory=/opt/cmf-monitor/reports
-Restart=always
-User=ubuntu
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Activar el servicio:
-```bash
-sudo systemctl enable cmf-dashboard
-sudo systemctl start cmf-dashboard
-```
-
-### Opción C — IIS (Windows) o nginx/Apache (Linux)
-
-Configurar el servidor web existente de la organización para servir el directorio `reports/` como sitio estático. El dashboard se actualiza automáticamente cada vez que `run.py` regenera `dashboard.html`.
-
----
-
-## 7. Estructura de archivos del proyecto
-
-```
-cmf-monitor/
-│
-├── run.py              # Punto de entrada: ejecuta los 5 pasos en secuencia
-├── scraper.py          # Descarga y parsea la tabla CMF; extrae entidad y
-│                       # tipo de servicio del texto de la resolución;
-│                       # incluye repair_entidades() para corregir históricos
-├── classifier.py       # Clasifica resoluciones por categoría
-├── enricher.py         # Busca cada entidad en CMF y obtiene: RUT completo,
-│                       # código de institución, domicilio, contacto, inscripción
-├── dashboard.py        # Genera reports/dashboard.html con panel interactivo
-├── requirements.txt    # Dependencias Python
-│
-├── data/
-│   ├── 2026-05-04.json # Datos del día (generado automáticamente)
-│   └── debug.html      # Última página HTML descargada (diagnóstico)
-│
-├── reports/
-│   └── dashboard.html  # Panel de control (generado automáticamente)
-│
-└── logs/               # (Solo Windows; en Linux: /var/log/cmf-monitor/)
-    └── cmf-monitor.log
-```
-
-### Crecimiento esperado del almacenamiento
-
-| Período | Archivos JSON | Tamaño aprox. |
-|---------|---------------|---------------|
-| 1 semana | 7 archivos | ~5 MB |
-| 1 mes | ~30 archivos | ~25 MB |
-| 1 año | ~365 archivos | ~300 MB |
-
----
-
-## 8. Dependencias Python
-
-El archivo `requirements.txt` contiene:
-
-```
-requests        # Solicitudes HTTP al sitio CMF
-beautifulsoup4  # Parseo de HTML
-lxml            # Parser HTML (más robusto que el incluido en Python)
-```
-
-Para instalar:
-```bash
-pip install -r requirements.txt
-# o en Linux:
-pip3 install -r requirements.txt
-```
-
----
-
-## 9. Variables configurables
-
-Estos parámetros se pueden ajustar editando los archivos Python sin conocimiento avanzado de programación:
-
-| Archivo | Variable | Valor actual | Descripción |
-|---------|----------|-------------|-------------|
-| `scraper.py` | `DIAS_HISTORICO` | `90` | Días de historia a descargar en cada ejecución |
-| `enricher.py` | `DELAY_SEG` | `2.0` | Segundos de pausa entre solicitudes al servidor CMF |
-| `enricher.py` | `TIMEOUT` | `25` | Segundos de espera máxima por solicitud HTTP |
-
----
-
-## 10. Monitoreo y alertas
-
-### Verificar que la ejecución fue exitosa
-
-Después de cada ejecución, revisar que exista el archivo JSON del día:
-
-```powershell
-# Windows
-Test-Path "C:\cmf-monitor\data\$(Get-Date -Format 'yyyy-MM-dd').json"
-```
-
-```bash
-# Linux
-ls -lh /opt/cmf-monitor/data/$(date +%Y-%m-%d).json
-```
-
-### Alerta por correo si la ejecución falla (Linux)
-
-Agregar al crontab una segunda tarea a las 07:00 que revise si el archivo del día existe:
-
-```cron
-0 7 * * * test -f /opt/cmf-monitor/data/$(date +%Y-%m-%d).json || echo "CMF Monitor no ejecuto el $(date)" | mail -s "ALERTA CMF Monitor" ti@organizacion.cl
-```
-
-### Alerta por correo si la ejecución falla (Windows PowerShell)
-
-Crear `C:\cmf-monitor\check.ps1`:
-```powershell
-$hoy = Get-Date -Format "yyyy-MM-dd"
-$archivo = "C:\cmf-monitor\data\$hoy.json"
-if (-not (Test-Path $archivo)) {
-    Send-MailMessage `
-      -To "ti@organizacion.cl" `
-      -From "servidor@organizacion.cl" `
-      -Subject "ALERTA: CMF Monitor no ejecuto el $hoy" `
-      -SmtpServer "smtp.organizacion.cl"
-}
-```
-
-Agregar una segunda tarea programada a las 07:00:
-```powershell
-schtasks /create `
-  /tn "CMF Monitor Verificacion" `
-  /tr "powershell -File C:\cmf-monitor\check.ps1" `
-  /sc DAILY `
-  /st 07:00 `
-  /ru SYSTEM `
-  /f
-```
-
----
-
-## 11. Resolución de problemas comunes
-
-| Síntoma | Causa probable | Solución |
-|---------|---------------|----------|
-| `ModuleNotFoundError: requests` | Dependencias no instaladas | Ejecutar `pip install -r requirements.txt` |
-| `No se encontró ninguna tabla` | CMF cambió el HTML de su página | Revisar `data/debug.html`; ajustar `scraper.py` |
-| `ConnectTimeoutError` | CMF no responde o hay rate limiting | El `enricher.py` reintenta automáticamente; si persiste, aumentar `DELAY_SEG` |
-| Entidad aparece sin nombre ni RUT | Texto de la resolución no coincide con el patrón esperado | Revisar el campo `resolucion` en el JSON del día; el patrón se puede extender en `scraper.py` |
-| JSON del día está vacío o con pocas resoluciones | No hay resoluciones recientes en CMF | Normal en períodos de baja actividad |
-| Dashboard desactualizado | La tarea programada no corrió | Verificar el log y ejecutar `python run.py` manualmente |
-| Error de codificación en Windows | Terminal Windows no muestra UTF-8 | Normal en la consola; el archivo dashboard.html se genera correctamente en UTF-8 |
-
----
-
-## 12. Fuente de datos
-
-**Organismo:** Comisión para el Mercado Financiero (CMF Chile)  
-**URL principal:** `https://www.cmfchile.cl/institucional/resoluciones/resoluciones_mercados_entidad.php`  
-**URL de búsqueda:** `https://www.cmfchile.cl/institucional/mercados/consulta_busqueda.php`  
-**URL de detalle:** `https://www.cmfchile.cl/institucional/mercados/entidad.php`  
-
-El sistema consume únicamente páginas HTML públicas del sitio de la CMF. No utiliza APIs privadas, credenciales de acceso ni scraping agresivo. Las pausas incorporadas respetan las buenas prácticas de acceso a sitios gubernamentales.
-
----
-
-## 13. Resumen para el equipo de TI
-
-Para poner en producción este sistema en un servidor con acceso a internet, los pasos son:
-
-1. **Instalar Python 3.10+** en el servidor (Windows o Linux)
-2. **Copiar los 5 archivos** del proyecto a una carpeta dedicada
-3. **Instalar 3 dependencias** con un solo comando (`pip install -r requirements.txt`)
-4. **Configurar la zona horaria** del servidor a `America/Santiago`
-5. **Programar una tarea diaria** a las 05:00 AM que ejecute `python run.py`
-6. **Compartir el archivo** `reports/dashboard.html` por carpeta de red o servidor web
-
-No se requiere base de datos, Docker, nginx ni ninguna infraestructura adicional. El único requisito de red es acceso HTTPS saliente al sitio de la CMF (puerto 443).
-
----
-
-*Documento generado en Mayo 2026. Para consultas sobre esta aplicación, contactar al periodista responsable del proyecto.*
+## 9. Puertos y red
+
+| Puerto | Proceso       | Direccion | Quien lo necesita                          |
+|--------|---------------|-----------|--------------------------------------------|
+| 5432   | Postgres      | Interno   | solo `app` (no se expone al host por default) |
+| 80     | nginx         | Interno   | mapeado a `${WEB_PORT}` (8080) del host    |
+| 443    | (cmfchile.cl) | Saliente  | `app` necesita salir para scrapear         |
+| 587    | (SMTP)        | Saliente  | `app` necesita salir para enviar correos   |
+
+Si quieres exponer el dashboard hacia internet, lo recomendable es poner
+un reverse proxy (Caddy / nginx del host / Traefik) delante con TLS y
+autenticacion basica. No expongas Postgres al exterior.

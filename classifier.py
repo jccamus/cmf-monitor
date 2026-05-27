@@ -1,22 +1,18 @@
 """
-Lee el JSON del día y asigna una categoría a cada resolución
-basándose en palabras clave en el texto de la resolución.
-Actualiza el mismo archivo JSON con el campo 'categoria'.
+Asigna una categoria a cada resolucion del dia segun palabras clave en el
+texto. Actualiza la columna 'categoria' en la tabla resoluciones.
 """
 
-import json
-import os
 import re
 import sys
 import unicodedata
 from collections import Counter
 from datetime import datetime
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
+import db
 
 # Orden importa: la primera coincidencia gana.
-# Las categorías más específicas deben ir antes que las generales.
+# Las categorias mas especificas deben ir antes que las generales.
 REGLAS: list[tuple[str, list[str]]] = [
     ("nueva_actividad",    ["AUTORIZA LA PRESTACIÓN", "AUTORIZA EL INICIO", "AUTORIZA INICIO",
                             "AUTORIZA LA OPERACIÓN", "AUTORIZA OPERACIÓN"]),
@@ -39,18 +35,13 @@ REGLAS: list[tuple[str, list[str]]] = [
 
 
 def _sin_tildes(texto: str) -> str:
-    """Quita tildes/diacríticos para que el match no dependa de la acentuación."""
     return "".join(
         c for c in unicodedata.normalize("NFD", texto)
         if unicodedata.category(c) != "Mn"
     )
 
 
-# REGLAS compiladas: cada keyword se normaliza (mayúsculas, sin tildes) y se
-# convierte en un patrón con LÍMITE DE PALABRA al inicio (\b) para evitar que
-# "FUSIÓN" matchee a "DIFUSIÓN", o "MULTA" a "MULTIPLICA". El límite a la
-# derecha se omite a propósito: queremos que "DIRECTOR" siga matcheando
-# "DIRECTORES" o "DIRECTORA", y "MULTA" a "MULTADO".
+# Limite de palabra (\b) al inicio para evitar "FUSION" matchee "DIFUSION".
 _REGLAS_NORM: list[tuple[str, list[re.Pattern[str]]]] = [
     (categoria, [re.compile(r"\b" + re.escape(_sin_tildes(kw.upper())))
                  for kw in keywords])
@@ -67,37 +58,37 @@ def clasificar(texto: str) -> str:
     return "otro"
 
 
-def clasificar_archivo(path: str) -> list[dict]:
-    with open(path, encoding="utf-8") as f:
-        records: list[dict] = json.load(f)
+def run(fecha: str | None = None) -> dict[str, int]:
+    # 'fecha' se mantiene en la firma por compatibilidad con el orquestador,
+    # pero la clasificacion es global: re-clasifica todas las resoluciones de
+    # la DB (es barato y mantiene la idempotencia del pipeline).
+    del fecha
+    fecha_log = datetime.today().strftime("%Y-%m-%d")
 
-    for r in records:
-        r["categoria"] = clasificar(r.get("resolucion", ""))
+    cats: Counter = Counter()
+    with db.conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT fecha, numero, resolucion FROM resoluciones")
+            filas = cur.fetchall()
+            updates = []
+            for f, n, resolucion in filas:
+                cat = clasificar(resolucion or "")
+                cats[cat] += 1
+                updates.append((cat, f, n))
+            if updates:
+                cur.executemany(
+                    "UPDATE resoluciones SET categoria = %s, updated_at = now() "
+                    "WHERE fecha = %s AND numero = %s "
+                    "  AND categoria IS DISTINCT FROM %s",
+                    [(cat, f, n, cat) for cat, f, n in updates],
+                )
 
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
-
-    return records
-
-
-def run(fecha: str | None = None) -> list[dict]:
-    if fecha is None:
-        fecha = datetime.today().strftime("%Y-%m-%d")
-
-    path = os.path.join(DATA_DIR, f"{fecha}.json")
-    if not os.path.exists(path):
-        print(f"No existe {path}. Ejecuta scraper.py primero.")
-        sys.exit(1)
-
-    records = clasificar_archivo(path)
-
-    cats = Counter(r["categoria"] for r in records)
-    print(f"Clasificación {fecha} ({len(records)} resoluciones):")
+    print(f"Clasificacion {fecha_log} ({sum(cats.values())} resoluciones):")
     for cat, n in cats.most_common():
         label = cat.replace("_", " ").title()
         print(f"  {label:<25} {n}")
 
-    return records
+    return dict(cats)
 
 
 if __name__ == "__main__":

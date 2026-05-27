@@ -1,0 +1,15 @@
+Hola equipo,
+
+En el monitoreo CMF del $fecha se detectaron $n nueva(s) entidad(es)
+autorizada(s) sin código de institución asignado.
+
+Por favor hacer seguimiento al registro CMF para verificar cuándo les
+asignan el código.
+
+$tabla
+
+Ver el detalle completo en el dashboard:
+  $dashboard_url
+
+---
+CMF Monitor — mensaje automático, no responder este correo.
