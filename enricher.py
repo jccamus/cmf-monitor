@@ -293,12 +293,16 @@ def run(
     with open(path, encoding="utf-8") as f:
         records: list[dict] = json.load(f)
 
-    # Procesar entidades sin 'num_inscripcion' (datos de detalle ausentes)
+    # Procesar entidades que aun no estan completas: o falta 'num_inscripcion'
+    # (jamas se enriquecio) o ya esta inscrita pero codigo_institucion sigue
+    # "No asignado" (CMF asigna el codigo despues de la inscripcion, asi que
+    # hay que volver a consultar la ficha hasta que aparezca).
     pendientes = [
         r for r in records
         if r.get("entidad")
         and (not solo_autorizadas or r.get("autoriza_prestacion"))
-        and not r.get("num_inscripcion")
+        and (not r.get("num_inscripcion")
+             or r.get("codigo_institucion", "") in ("", "No asignado"))
     ]
 
     if not pendientes:
