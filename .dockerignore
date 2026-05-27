@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+.claude/
+__pycache__/
+*.pyc
+reports/
+logs/
+data/debug*.html
+Propuesta.txt

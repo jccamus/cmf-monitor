@@ -1,19 +1,12 @@
 """
-Enriquece el JSON diario en dos pasos por entidad:
-  1. Búsqueda CMF → RUT, Tipo Entidad, Vigencia, URL de detalle
-  2. Página de detalle → todos los campos del registro oficial
+Enriquece registros AUTORIZA LA PRESTACION en dos pasos por entidad:
+  1. Busqueda CMF -> RUT, Tipo Entidad, Vigencia, URL de detalle
+  2. Pagina de detalle -> todos los campos del registro oficial
 
-Los campos de detalle incluyen: rut_completo, codigo_institucion,
-razon_social, nombre_fantasia, num_inscripcion, fecha_inscripcion,
-antecedentes_inscripcion, fecha_cancelacion, telefono, fax, domicilio,
-region, ciudad, comuna, email, sitio_web, codigo_postal.
-
-Por defecto solo procesa registros AUTORIZA LA PRESTACIÓN.
-Solo re-procesa registros sin 'num_inscripcion' (los nuevos o sin detalle).
+Solo procesa registros con autoriza_prestacion=true que aun no tienen
+num_inscripcion (incremental: lo que ya esta enriquecido no se re-pega).
 """
 
-import json
-import os
 import sys
 import time
 import unicodedata
@@ -23,8 +16,7 @@ from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 
-BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR  = os.path.join(BASE_DIR, "data")
+import db
 
 CMF_HOME   = "https://www.cmfchile.cl/"
 SEARCH_URL = (
@@ -52,7 +44,7 @@ VACIO_BUSQUEDA = {
     "vigencia": "No encontrado", "detail_url": "",
 }
 
-# Mapa etiqueta (normalizada sin tildes, mayúsculas) → clave JSON
+# Mapa etiqueta (normalizada sin tildes, mayusculas) -> columna en resoluciones
 CAMPOS_DETALLE: dict[str, str] = {
     "RUT":                         "rut_completo",
     "CODIGO DE LA INSTITUCION":    "codigo_institucion",
@@ -74,6 +66,11 @@ CAMPOS_DETALLE: dict[str, str] = {
     "CODIGO POSTAL":               "codigo_postal",
 }
 
+# Columnas que actualizamos al final de buscar_entidad()
+COLS_BUSQUEDA = ["rut", "nombre_cmf", "tipo_entidad_cmf", "vigencia"]
+COLS_DETALLE  = list(CAMPOS_DETALLE.values())
+COLS_TODAS    = COLS_BUSQUEDA + COLS_DETALLE
+
 
 # ---------------------------------------------------------------------------
 # Utilidades
@@ -87,8 +84,6 @@ def _sin_tildes(texto: str) -> str:
 
 
 def _col(headers: list[str], *keywords: str) -> int | None:
-    """Índice de la primera columna que contiene algún keyword.
-    No usa 'or' encadenado para evitar que índice 0 sea tratado como falsy."""
     for kw in keywords:
         for i, h in enumerate(headers):
             if kw in h:
@@ -107,7 +102,7 @@ def _crear_sesion() -> requests.Session:
 
 
 # ---------------------------------------------------------------------------
-# PASO 1 — Búsqueda: RUT + link de detalle
+# PASO 1 - Busqueda
 # ---------------------------------------------------------------------------
 
 def _parse_busqueda(html: str, nombre_buscado: str) -> dict:
@@ -178,10 +173,9 @@ def _buscar(nombre: str, sesion: requests.Session) -> dict:
     palabras = nombre.split()
     if len(palabras) > 1:
         intentos.append(palabras[0])
-    # Fallback extra para nombres con & u otros caracteres especiales
     if "&" in nombre or "/" in nombre:
         limpio = nombre.replace("&", " ").replace("/", " ")
-        limpio = " ".join(limpio.split())  # normalizar espacios
+        limpio = " ".join(limpio.split())
         intentos.append(limpio)
         intentos.append(_sin_tildes(limpio))
         palabras_limpias = limpio.split()
@@ -211,7 +205,7 @@ def _buscar(nombre: str, sesion: requests.Session) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# PASO 2 — Detalle: todos los campos del registro oficial
+# PASO 2 - Detalle
 # ---------------------------------------------------------------------------
 
 def _detalle_vacio() -> dict:
@@ -258,18 +252,11 @@ def _fetch_detail(detail_url: str, sesion: requests.Session) -> dict:
     return base
 
 
-# ---------------------------------------------------------------------------
-# Función principal por entidad
-# ---------------------------------------------------------------------------
-
 def buscar_entidad(nombre: str, sesion: requests.Session) -> dict:
-    """Busca la entidad y obtiene todos sus datos de detalle."""
     busqueda = _buscar(nombre, sesion)
     detail_url = busqueda.pop("detail_url", "")
-
     time.sleep(DELAY_SEG)
     detalle = _fetch_detail(detail_url, sesion)
-
     return {**busqueda, **detalle}
 
 
@@ -277,60 +264,65 @@ def buscar_entidad(nombre: str, sesion: requests.Session) -> dict:
 # Entrada principal
 # ---------------------------------------------------------------------------
 
-def run(
-    fecha: str | None = None,
-    solo_autorizadas: bool = True,
-) -> list[dict]:
+# UPDATE generado dinamicamente con todas las columnas de enriquecimiento.
+_SET_COLS = ", ".join(f"{c} = %s" for c in COLS_TODAS)
+_UPDATE_SQL = (
+    f"UPDATE resoluciones SET {_SET_COLS}, updated_at = now() "
+    "WHERE fecha = %s AND numero = %s"
+)
 
-    if fecha is None:
-        fecha = datetime.today().strftime("%Y-%m-%d")
 
-    path = os.path.join(DATA_DIR, f"{fecha}.json")
-    if not os.path.exists(path):
-        print(f"No existe {path}. Ejecuta scraper.py primero.")
-        sys.exit(1)
+def run(fecha: str | None = None) -> int:
+    # 'fecha' se acepta por compatibilidad pero el enricher procesa TODOS los
+    # pendientes del universo (no solo los de un dia): asi recoge entidades
+    # que aparecieron en corridas anteriores pero quedaron sin enriquecer.
+    del fecha
 
-    with open(path, encoding="utf-8") as f:
-        records: list[dict] = json.load(f)
+    with db.conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT fecha, numero, entidad FROM resoluciones "
+                "WHERE autoriza_prestacion = TRUE "
+                "  AND entidad <> '' "
+                "  AND COALESCE(num_inscripcion, '') = '' "
+                "ORDER BY fecha DESC, numero DESC"
+            )
+            pendientes = cur.fetchall()
 
-    # Procesar entidades sin 'num_inscripcion' (datos de detalle ausentes)
-    pendientes = [
-        r for r in records
-        if r.get("entidad")
-        and (not solo_autorizadas or r.get("autoriza_prestacion"))
-        and not r.get("num_inscripcion")
-    ]
+        if not pendientes:
+            print("Todos los registros ya tienen datos de detalle.")
+            return 0
 
-    if not pendientes:
-        print("Todos los registros ya tienen datos de detalle.")
-        return records
+        print(f"Enriqueciendo {len(pendientes)} entidades (busqueda + detalle)...")
+        sesion = _crear_sesion()
+        time.sleep(1)
 
-    print(f"Enriqueciendo {len(pendientes)} entidades (busqueda + detalle)...")
-    sesion = _crear_sesion()
-    time.sleep(1)
+        cache: dict[str, dict] = {}
+        actualizadas = 0
+        for i, (fecha_row, numero, entidad) in enumerate(pendientes, 1):
+            print(f"  [{i}/{len(pendientes)}] {entidad}")
 
-    cache: dict[str, dict] = {}
-    for i, r in enumerate(pendientes, 1):
-        entidad = r["entidad"]
-        print(f"  [{i}/{len(pendientes)}] {entidad}")
+            if entidad not in cache:
+                cache[entidad] = buscar_entidad(entidad, sesion)
+                time.sleep(DELAY_SEG)
 
-        if entidad not in cache:
-            cache[entidad] = buscar_entidad(entidad, sesion)
-            time.sleep(DELAY_SEG)
+            datos = cache[entidad]
+            valores = [datos.get(c, "") for c in COLS_TODAS]
+            with conn.cursor() as cur:
+                cur.execute(_UPDATE_SQL, (*valores, fecha_row, numero))
+            # Commit por entidad: si el proceso se cae a mitad de la corrida,
+            # lo enriquecido hasta ese punto no se pierde y la proxima corrida
+            # solo retoma los pendientes restantes.
+            conn.commit()
+            actualizadas += 1
 
-        datos = cache[entidad]
-        r.update(datos)
+            rut_fmt = datos.get("rut_completo") or datos.get("rut") or "—"
+            cod     = datos.get("codigo_institucion", "No asignado")
+            insc    = datos.get("num_inscripcion", "")
+            print(f"           RUT: {rut_fmt} | Cod.inst: {cod} | Insc: {insc}")
 
-        rut_fmt = datos.get("rut_completo") or datos.get("rut") or "—"
-        cod     = datos.get("codigo_institucion", "No asignado")
-        insc    = datos.get("num_inscripcion", "")
-        print(f"           RUT: {rut_fmt} | Cod.inst: {cod} | Insc: {insc}")
-
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
-    print(f"\nGuardado: {path}")
-
-    return records
+    print(f"\n{actualizadas} entidad(es) enriquecida(s).")
+    return actualizadas
 
 
 if __name__ == "__main__":

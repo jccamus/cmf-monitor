@@ -1,17 +1,15 @@
 """
-Descarga las resoluciones del sitio CMF Chile y guarda un JSON por día
-en la carpeta data/.
+Descarga las resoluciones del sitio CMF Chile y las upsertea en la tabla
+'resoluciones' de Postgres.
 
-Estructura real de la página CMF (columnas):
+Estructura real de la pagina CMF (columnas):
   0: N°   1: FECHA   2: MATERIA   3: ARCHIVO
 
 La entidad y el tipo de servicio se extraen del texto de MATERIA,
-que siempre sigue el patrón:
-  "AUTORIZA LA PRESTACIÓN DEL SERVICIO DE <TIPO_SERVICIO> DE <ENTIDAD>."
+que siempre sigue el patron:
+  "AUTORIZA LA PRESTACION DEL SERVICIO DE <TIPO_SERVICIO> DE <ENTIDAD>."
 """
 
-import glob
-import json
 import os
 import re
 import sys
@@ -19,6 +17,9 @@ from datetime import datetime, timedelta
 
 import requests
 from bs4 import BeautifulSoup
+
+import db
+import issues
 
 URL = (
     "https://www.cmfchile.cl/institucional/resoluciones/"
@@ -40,11 +41,14 @@ COL_NUMERO  = 0
 COL_FECHA   = 1
 COL_MATERIA = 2
 
-# Ventana de búsqueda: solo se conservan resoluciones de los últimos N días
+# Ventana de busqueda: solo se conservan resoluciones de los ultimos N dias
 DIAS_HISTORICO = 90
 
-# Tipos de servicio en orden de especificidad (más largo primero para evitar
-# que "ASESORÍA" consuma a "ASESORÍA DE INVERSIÓN")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")  # solo para data/debug.html
+
+# Tipos de servicio en orden de especificidad (mas largo primero para evitar
+# que "ASESORIA" consuma a "ASESORIA DE INVERSION")
 _TIPOS_SERVICIO = [
     r"ASESOR[IÍ]A\s+DE\s+INVERSI[OÓ]N",
     r"ASESOR[IÍ]A\s+CREDITICIA",
@@ -61,18 +65,13 @@ _TIPOS_SERVICIO = [
 ]
 
 _MATERIA_RE = re.compile(
-    # Encabezado: acepta "DEL SERVICIO", "DE LOS SERVICIOS", etc.
     r"AUTORIZA\s+LA\s+PRESTACI[OÓ]N\s+DE(?:L?|\s+LOS?)\s+SERVICIOS?\s+(?:DE\s+)?"
-    # Primer tipo de servicio (grupo 1)
     r"(" + "|".join(_TIPOS_SERVICIO) + r")"
-    # Opcional: "Y segundo_servicio" (descartado, solo capturamos el primero)
     r"(?:\s+Y\s+(?:" + "|".join(_TIPOS_SERVICIO) + r"))*"
-    # Preposición + entidad (grupo 2) — [\s\S]+? para capturar aunque haya saltos de línea
     r"\s+(?:DE|A)\s+([\s\S]+?)\.?\s*$",
     re.IGNORECASE,
 )
 
-# Mapeo tipo de servicio → categoría de empresa
 _SERVICIO_A_TIPO: dict[str, str] = {
     "ASESORÍA DE INVERSIÓN":                    "Asesor de Inversiones",
     "ASESORÍA CREDITICIA":                      "Asesor Crediticio",
@@ -94,7 +93,6 @@ _SERVICIO_A_TIPO: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 def to_iso(s: str) -> str:
-    """Convierte DD.MM.YYYY, DD-MM-YYYY o DD/MM/YYYY a YYYY-MM-DD."""
     s = s.strip()
     for fmt in ("%d.%m.%Y", "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
         try:
@@ -105,14 +103,11 @@ def to_iso(s: str) -> str:
 
 
 def _normalizar_servicio(raw: str) -> str:
-    """Convierte el texto capturado del regex a la clave canónica."""
     s = re.sub(r"\s+", " ", raw).strip().upper()
-    # Normalizar vocales acentuadas
     reemplazos = {"Í": "I", "Ó": "O", "É": "E", "Á": "A", "Ú": "U",
                   "í": "i", "ó": "o", "é": "e", "á": "a", "ú": "u"}
     for k, v in reemplazos.items():
         s = s.replace(k, v)
-    # Buscar la clave canónica
     for clave in _SERVICIO_A_TIPO:
         clave_norm = clave.upper()
         for k, v in reemplazos.items():
@@ -123,14 +118,9 @@ def _normalizar_servicio(raw: str) -> str:
 
 
 def extraer_entidad_y_servicio(materia: str) -> tuple[str, str, str]:
-    """
-    Retorna (entidad, tipo_servicio, tipo_empresa) extraídos del texto
-    de la resolución. Si no coincide el patrón, retorna ("", materia, "Otra").
-    """
     m = _MATERIA_RE.search(materia)
     if not m:
         return "", materia, "Otra"
-
     servicio_raw = m.group(1).strip()
     entidad = re.sub(r"\s+", " ", m.group(2)).strip().rstrip(".")
     servicio = _normalizar_servicio(servicio_raw)
@@ -172,7 +162,6 @@ def parse(html: str) -> list[dict]:
         materia = cells[COL_MATERIA].get_text(" ", strip=True)
 
         es_autoriza = materia.upper().startswith("AUTORIZA LA PRESTACI")
-
         entidad, tipo_servicio, tipo_empresa = extraer_entidad_y_servicio(materia)
 
         records.append({
@@ -182,7 +171,6 @@ def parse(html: str) -> list[dict]:
             "tipo_servicio":       tipo_servicio,
             "resolucion":          materia,
             "autoriza_prestacion": es_autoriza,
-            "categoria":           "",
             "tipo_empresa":        tipo_empresa,
         })
 
@@ -190,58 +178,65 @@ def parse(html: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Entrada principal
+# Persistencia en Postgres
 # ---------------------------------------------------------------------------
 
-# Campos que el scraper recalcula en cada corrida (deterministas desde el texto
-# de 'resolucion'). El resto de claves las añaden classifier.py y enricher.py;
-# esas deben conservarse de una corrida a la siguiente.
-CAMPOS_BASE = {
-    "fecha", "numero", "entidad", "tipo_servicio",
-    "resolucion", "autoriza_prestacion", "tipo_empresa",
-}
+# UPSERT solo de los campos base (los que el scraper recalcula). El resto
+# (categoria, rut, enriquecimiento) NO se toca: queda como estaba si la fila
+# ya existia, vacio si es nueva. Asi la pipeline sigue siendo incremental.
+_UPSERT_SQL = """
+INSERT INTO resoluciones
+    (fecha, numero, entidad, tipo_servicio, resolucion,
+     autoriza_prestacion, tipo_empresa)
+VALUES (%s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (fecha, numero) DO UPDATE SET
+    entidad             = EXCLUDED.entidad,
+    tipo_servicio       = EXCLUDED.tipo_servicio,
+    resolucion          = EXCLUDED.resolucion,
+    autoriza_prestacion = EXCLUDED.autoriza_prestacion,
+    tipo_empresa        = EXCLUDED.tipo_empresa,
+    updated_at          = now()
+WHERE
+    -- evita updates espurios que solo cambian updated_at
+    resoluciones.entidad             IS DISTINCT FROM EXCLUDED.entidad
+ OR resoluciones.tipo_servicio       IS DISTINCT FROM EXCLUDED.tipo_servicio
+ OR resoluciones.resolucion          IS DISTINCT FROM EXCLUDED.resolucion
+ OR resoluciones.autoriza_prestacion IS DISTINCT FROM EXCLUDED.autoriza_prestacion
+ OR resoluciones.tipo_empresa        IS DISTINCT FROM EXCLUDED.tipo_empresa
+"""
 
 
-def _cargar_historico() -> dict[tuple[str, str], dict]:
-    """Mapa (fecha, numero) -> registro mas reciente ya guardado en data/.
+def _guardar(records: list[dict]) -> int:
+    """Upsertea records. Devuelve cuantas filas YA tenian num_inscripcion
+    antes del upsert (info para el log: cuantas no van a re-procesarse en
+    enricher porque ya tienen detalle)."""
+    if not records:
+        return 0
+    fechas  = [r["fecha"]  for r in records]
+    numeros = [r["numero"] for r in records]
+    with db.conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM resoluciones r "
+                "JOIN unnest(%s::date[], %s::text[]) AS k(fecha, numero) "
+                "  ON r.fecha = k.fecha AND r.numero = k.numero "
+                "WHERE r.num_inscripcion <> ''",
+                (fechas, numeros),
+            )
+            row = cur.fetchone()
+            conservados = int(row[0]) if row else 0
 
-    Recorre los JSON en orden ascendente, asi que para cada clave queda la
-    version del archivo mas nuevo (la que tiene mas datos de enriquecimiento).
-    """
-    historico: dict[tuple[str, str], dict] = {}
-    for path in sorted(glob.glob(os.path.join(DATA_DIR, "????-??-??.json"))):
-        try:
-            with open(path, encoding="utf-8") as f:
-                prev = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            continue
-        for r in prev:
-            historico[(r.get("fecha", ""), r.get("numero", ""))] = r
-    return historico
-
-
-def _fusionar_enriquecimiento(
-    records: list[dict], historico: dict[tuple[str, str], dict]
-) -> int:
-    """Copia a cada registro recien scrapeado los campos que classifier/enricher
-    ya habian calculado en corridas anteriores. Asi enricher.py vuelve a ser
-    incremental (salta lo que ya tiene 'num_inscripcion').
-    Retorna cuantas entidades conservaron sus datos de detalle."""
-    conservados = 0
-    for r in records:
-        prev = historico.get((r.get("fecha", ""), r.get("numero", "")))
-        if not prev:
-            continue
-        for k, v in prev.items():
-            if k not in CAMPOS_BASE and k not in r:
-                r[k] = v
-        # 'categoria' la trae el scraper vacia; conservar la previa si existe.
-        if prev.get("categoria"):
-            r["categoria"] = prev["categoria"]
-        if r.get("num_inscripcion"):
-            conservados += 1
+            cur.executemany(_UPSERT_SQL, [
+                (r["fecha"], r["numero"], r["entidad"], r["tipo_servicio"],
+                 r["resolucion"], r["autoriza_prestacion"], r["tipo_empresa"])
+                for r in records
+            ])
     return conservados
 
+
+# ---------------------------------------------------------------------------
+# Entrada principal
+# ---------------------------------------------------------------------------
 
 def run(fecha: str | None = None) -> list[dict]:
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -253,8 +248,20 @@ def run(fecha: str | None = None) -> list[dict]:
         resp.encoding = "utf-8"
         html = resp.text
     except requests.RequestException as exc:
+        # Registramos como incidencia visible en el dashboard y propagamos la
+        # excepcion. run.py la captura para que el resto del pipeline (tareas,
+        # mailer, dashboard) siga corriendo contra los datos previos en la DB.
         print(f"ERROR al descargar: {exc}")
-        sys.exit(1)
+        try:
+            issues.registrar(
+                "scraper_error_red", "error",
+                f"Fallo la descarga del listado CMF: {exc}",
+                {"error": str(exc), "url": URL},
+            )
+        except Exception as exc_inc:
+            # Si tampoco se puede escribir la incidencia (DB caida), solo log.
+            print(f"  (ademas no se pudo registrar la incidencia: {exc_inc})")
+        raise
 
     debug_path = os.path.join(DATA_DIR, "debug.html")
     with open(debug_path, "w", encoding="utf-8") as f:
@@ -263,61 +270,44 @@ def run(fecha: str | None = None) -> list[dict]:
     print("Parseando tabla...")
     records = parse(html)
 
-    # Filtrar por la ventana de DIAS_HISTORICO días
     fecha_limite = (datetime.today() - timedelta(days=DIAS_HISTORICO)).strftime("%Y-%m-%d")
     records = [r for r in records if r.get("fecha", "") >= fecha_limite]
 
-    # Conservar lo que classifier/enricher ya calcularon en corridas anteriores,
-    # para no re-clasificar ni re-scrapear el detalle de cada entidad cada día.
-    conservados = _fusionar_enriquecimiento(records, _cargar_historico())
+    conservados = _guardar(records)
 
     ap = [r for r in records if r["autoriza_prestacion"]]
     print(f"  {len(records)} resoluciones (ultimos {DIAS_HISTORICO} dias), {len(ap)} AUTORIZA LA PRESTACION")
     print(f"  {conservados} entidad(es) ya tenian datos de detalle (se conservan)")
-
-    if fecha is None:
-        fecha = datetime.today().strftime("%Y-%m-%d")
-    out_path = os.path.join(DATA_DIR, f"{fecha}.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
-    print(f"  Guardado: {out_path}")
+    if fecha:
+        print(f"  Fecha de corrida: {fecha}")
 
     return records
 
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-
-
 def repair_entidades() -> None:
-    """
-    Re-extrae entidad/tipo_servicio/tipo_empresa en todos los JSON históricos
-    para registros donde entidad quedó vacía (fallo del regex antiguo).
-    Solo modifica registros con autoriza_prestacion=True y entidad="".
-    """
-    paths = sorted(glob.glob(os.path.join(DATA_DIR, "????-??-??.json")))
-    total_reparados = 0
-    for path in paths:
-        with open(path, encoding="utf-8") as f:
-            records = json.load(f)
-        changed = 0
-        for r in records:
-            if r.get("entidad") == "" and r.get("autoriza_prestacion"):
-                entidad, servicio, tipo = extraer_entidad_y_servicio(
-                    r.get("resolucion", "")
-                )
+    """Re-extrae entidad/tipo_servicio/tipo_empresa para registros donde
+    entidad quedo vacia (fallo del regex antiguo). Solo modifica filas con
+    autoriza_prestacion=true y entidad=''."""
+    reparados = 0
+    with db.conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT fecha, numero, resolucion FROM resoluciones "
+                "WHERE entidad = '' AND autoriza_prestacion = TRUE"
+            )
+            filas = cur.fetchall()
+            for fecha, numero, resolucion in filas:
+                entidad, servicio, tipo = extraer_entidad_y_servicio(resolucion or "")
                 if entidad:
-                    r["entidad"]       = entidad
-                    r["tipo_servicio"] = servicio
-                    r["tipo_empresa"]  = tipo
-                    changed += 1
-        if changed:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(records, f, ensure_ascii=False, indent=2)
-            print(f"  Reparados {changed} registro(s) en {os.path.basename(path)}")
-            total_reparados += changed
-    if total_reparados:
-        print(f"  Total reparados: {total_reparados}")
+                    cur.execute(
+                        "UPDATE resoluciones SET entidad=%s, tipo_servicio=%s, "
+                        "tipo_empresa=%s, updated_at=now() "
+                        "WHERE fecha=%s AND numero=%s",
+                        (entidad, servicio, tipo, fecha, numero),
+                    )
+                    reparados += 1
+    if reparados:
+        print(f"  Total reparados: {reparados}")
     else:
         print("  No habia registros con entidad vacia.")
 

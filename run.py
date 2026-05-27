@@ -8,6 +8,8 @@ Uso:
 import sys
 from datetime import datetime
 
+import db
+import issues
 import scraper
 import classifier
 import enricher
@@ -16,24 +18,69 @@ import mailer
 import dashboard
 
 
+def _detectar_entidades_no_extraidas() -> None:
+    """Despues del repair, las filas con autoriza_prestacion=true que sigan
+    con entidad='' son casos que el regex no pudo manejar. Las registramos
+    como incidencia para que el equipo extienda _TIPOS_SERVICIO o corrija
+    el dato a mano."""
+    with db.conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT fecha, numero, resolucion FROM resoluciones "
+                "WHERE autoriza_prestacion = TRUE AND entidad = '' "
+                "ORDER BY fecha DESC, numero DESC"
+            )
+            filas = cur.fetchall()
+
+    for fecha, numero, resolucion in filas:
+        issues.registrar(
+            "entidad_no_extraida", "error",
+            f"No se pudo extraer entidad de la resolucion {numero} "
+            f"({fecha.isoformat() if hasattr(fecha, 'isoformat') else fecha}).",
+            {
+                "fecha":      fecha.isoformat() if hasattr(fecha, "isoformat") else str(fecha),
+                "numero":     numero,
+                "resolucion": (resolucion or "")[:300],
+            },
+        )
+
+    if filas:
+        print(f"  {len(filas)} resolucion(es) sin entidad extraida — registradas como incidencia.")
+
+
 def main():
-    # Resolver la fecha UNA sola vez en el orquestador y pasarla explicita a
-    # cada submodulo. Si dejamos que cada uno llame a datetime.today() por su
-    # lado, una corrida que cruce medianoche escribiria scraper en
-    # YYYY-MM-DD.json y classifier intentaria abrir YYYY-MM-(DD+1).json.
     fecha = sys.argv[1] if len(sys.argv) > 1 else datetime.today().strftime("%Y-%m-%d")
     print(f"Fecha de la corrida: {fecha}")
+
+    # Limpiar incidencias de hoy: cada corrida empieza con la pizarra limpia
+    # y vuelve a registrar lo que detecte. El historico de dias anteriores
+    # se preserva para el log semanal.
+    issues.limpiar_hoy()
 
     print("=" * 50)
     print("PASO 1 - Scraper CMF (ultimos 90 dias)")
     print("=" * 50)
-    scraper.run(fecha)
+    scraper_ok = True
+    try:
+        scraper.run(fecha)
+    except Exception as exc:
+        # El scraper ya registro una incidencia. Seguimos con el resto del
+        # pipeline contra los datos previos en la DB: el dashboard se regenera
+        # mostrando la alerta, y tareas/mailer evaluan transiciones reales
+        # (puede que aun haya algo que notificar de corridas anteriores).
+        scraper_ok = False
+        print(f"PASO 1 fallo: {exc}")
+        print("Continuando con los datos previos en la base de datos.")
 
     print()
     print("=" * 50)
     print("PASO 1.5 - Reparacion de entidades historicas")
     print("=" * 50)
-    scraper.repair_entidades()
+    if scraper_ok:
+        scraper.repair_entidades()
+        _detectar_entidades_no_extraidas()
+    else:
+        print("Omitido porque PASO 1 fallo.")
 
     print()
     print("=" * 50)

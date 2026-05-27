@@ -26,6 +26,7 @@ from email.message import EmailMessage
 from string import Template
 
 import config
+import issues
 
 BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
@@ -204,6 +205,11 @@ def _correo(
     if not destinatarios:
         print(f"  {etiqueta}: hay {len(filas)} novedad(es) pero falta destinatario "
               f"(CMF_MAIL_TO_*); omitiendo.")
+        issues.registrar(
+            "destinatario_faltante", "error",
+            f"{etiqueta}: hay {len(filas)} novedad(es) pero el destinatario esta vacio.",
+            {"correo": etiqueta, "novedades": len(filas)},
+        )
         return
 
     fecha = datetime.today().strftime("%d/%m/%Y")
@@ -235,6 +241,11 @@ def _correo(
     except Exception as exc:
         # No relanzar: el otro correo debe poder intentarse igual.
         print(f"  {etiqueta}: ERROR enviando correo: {exc}")
+        issues.registrar(
+            "smtp_error", "error",
+            f"{etiqueta}: fallo el envio SMTP: {exc}",
+            {"correo": etiqueta, "excepcion": str(exc)},
+        )
 
 
 def notificar(novedades: dict) -> None:
@@ -243,6 +254,16 @@ def notificar(novedades: dict) -> None:
     if not config.smtp_configurado():
         print("SMTP no configurado (faltan CMF_SMTP_HOST / CMF_MAIL_FROM); "
               "se omiten los envíos de correo.")
+        # Solo registramos incidencia si HABIA algo para notificar.
+        total = len(novedades.get("nuevas_sin_codigo", [])) \
+              + len(novedades.get("recien_asignados", []))
+        if total:
+            issues.registrar(
+                "smtp_no_configurado", "error",
+                f"Hay {total} novedad(es) para notificar pero SMTP no esta configurado "
+                f"(faltan CMF_SMTP_HOST / CMF_MAIL_FROM).",
+                {"novedades": total},
+            )
         return
 
     _correo(

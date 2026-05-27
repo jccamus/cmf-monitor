@@ -1,9 +1,11 @@
-﻿# data/ se trackea para que el cron diario de GitHub Actions herede los JSON
-# enriquecidos de corridas anteriores (persistencia incremental en scraper.py).
-# Solo se ignoran los dumps HTML de diagnóstico, que son pesados y volátiles.
+# En la rama postgres-docker la DB vive en un volumen Docker, asi que
+# data/*.json deja de ser la fuente de verdad. Lo conservamos en el repo
+# solo para la migracion inicial (migrate.py los lee si las tablas estan
+# vacias). Los dumps HTML de diagnostico son pesados/volatiles.
 data/debug*.html
 reports/
 logs/
 *.pyc
 __pycache__/
 .claude/
+.env
