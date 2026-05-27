@@ -1,27 +1,4 @@
 {
-  "sin_codigo": {
-    "77898724": {
-      "entidad": "PONDERA SPA",
-      "rut": "77898724",
-      "rut_completo": "77898724 - 4",
-      "fecha_resolucion": "2026-04-23",
-      "tipo_servicio": "ASESORÍA DE INVERSIÓN",
-      "tipo_empresa": "Asesor de Inversiones",
-      "codigo_institucion": "No asignado",
-      "email": "pedropablo.santamaria@pondera.cl",
-      "primera_deteccion": "2026-05-15"
-    },
-    "77105314": {
-      "entidad": "COLBAST SPA",
-      "rut": "77105314",
-      "rut_completo": "77105314 - 9",
-      "fecha_resolucion": "2026-04-20",
-      "tipo_servicio": "ASESORÍA DE INVERSIÓN",
-      "tipo_empresa": "Asesor de Inversiones",
-      "codigo_institucion": "No asignado",
-      "email": "fcolomera@colbast.cl",
-      "primera_deteccion": "2026-05-15"
-    }
-  },
-  "ultima_corrida": "2026-05-15"
+  "sin_codigo": {},
+  "ultima_corrida": "2026-05-27"
 }
