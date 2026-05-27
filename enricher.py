@@ -8,8 +8,11 @@ razon_social, nombre_fantasia, num_inscripcion, fecha_inscripcion,
 antecedentes_inscripcion, fecha_cancelacion, telefono, fax, domicilio,
 region, ciudad, comuna, email, sitio_web, codigo_postal.
 
-Por defecto solo procesa registros AUTORIZA LA PRESTACIÓN.
-Solo re-procesa registros sin 'num_inscripcion' (los nuevos o sin detalle).
+Por defecto solo procesa registros AUTORIZA LA PRESTACIÓN. Procesa entidades
+pendientes: las que aun no tienen num_inscripcion (jamas se enriquecieron) o
+las que ya estan inscritas pero codigo_institucion sigue "No asignado" (CMF
+asigna el codigo despues de la inscripcion, asi que hay que volver a
+consultar la ficha hasta que aparezca).
 """
 
 import json
@@ -293,12 +296,15 @@ def run(
     with open(path, encoding="utf-8") as f:
         records: list[dict] = json.load(f)
 
-    # Procesar entidades sin 'num_inscripcion' (datos de detalle ausentes)
+    # Pendiente = nunca enriquecido (sin num_inscripcion) o ya inscrito pero
+    # todavia sin codigo de institucion asignado por CMF. Sigue siendo
+    # incremental: cuando ambos campos esten poblados deja de tocarse.
     pendientes = [
         r for r in records
         if r.get("entidad")
         and (not solo_autorizadas or r.get("autoriza_prestacion"))
-        and not r.get("num_inscripcion")
+        and (not r.get("num_inscripcion")
+             or r.get("codigo_institucion", "") in ("", "No asignado"))
     ]
 
     if not pendientes:
