@@ -3,8 +3,10 @@ Enriquece registros AUTORIZA LA PRESTACION en dos pasos por entidad:
   1. Busqueda CMF -> RUT, Tipo Entidad, Vigencia, URL de detalle
   2. Pagina de detalle -> todos los campos del registro oficial
 
-Solo procesa registros con autoriza_prestacion=true que aun no tienen
-num_inscripcion (incremental: lo que ya esta enriquecido no se re-pega).
+Procesa entidades pendientes: las que aun no tienen num_inscripcion (jamas
+se enriquecieron) o las que ya estan inscritas pero codigo_institucion
+sigue "No asignado" (CMF asigna el codigo despues de la inscripcion, asi
+que hay que volver a consultar la ficha hasta que aparezca).
 """
 
 import sys
@@ -280,11 +282,16 @@ def run(fecha: str | None = None) -> int:
 
     with db.conectar() as conn:
         with conn.cursor() as cur:
+            # Pendiente = nunca enriquecido (sin num_inscripcion) o ya inscrito
+            # pero todavia sin codigo de institucion asignado por CMF. Sigue
+            # siendo incremental: cuando ambos campos esten poblados deja de
+            # tocarse.
             cur.execute(
                 "SELECT fecha, numero, entidad FROM resoluciones "
                 "WHERE autoriza_prestacion = TRUE "
                 "  AND entidad <> '' "
-                "  AND COALESCE(num_inscripcion, '') = '' "
+                "  AND (COALESCE(num_inscripcion, '') = '' "
+                "       OR codigo_institucion IN ('', 'No asignado')) "
                 "ORDER BY fecha DESC, numero DESC"
             )
             pendientes = cur.fetchall()
